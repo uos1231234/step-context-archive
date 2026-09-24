@@ -1,0 +1,14 @@
+{
+  "name": "step-context-archive",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

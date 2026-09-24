@@ -1,0 +1,7 @@
+{
+	"id": "context-archive",
+	"name": "Context Archive",
+	"description": "瀑布式上下文压缩：算法去重→三点摘要，stamp 归档与召回，有界工具投影",
+	"version": "0.1.0",
+	"skills": ["skills/context-archive"]
+}

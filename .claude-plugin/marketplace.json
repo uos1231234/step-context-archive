@@ -1,0 +1,11 @@
+{
+	"name": "context-archive-plugins",
+	"description": "context-archive 瀑布式上下文压缩插件集合：stamp 归档、三点摘要与有界工具投影",
+	"plugins": [
+		{
+			"name": "context-archive",
+			"description": "瀑布式上下文压缩：算法去重→三点摘要，stamp 归档与召回，有界工具投影",
+			"source": "plugins/context-archive"
+		}
+	]
+}

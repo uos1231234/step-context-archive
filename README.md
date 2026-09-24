@@ -1,0 +1,91 @@
+# context-archive
+
+Step Code（宿主 extension + skill）插件：瀑布式上下文压缩——算法去重→三点摘要，stamp 归档与召回，有界工具投影。
+
+## 工作原理
+
+```
+100K 介入线（THRESHOLDS.enterTokens = 100_000）
+   └─ 80% 门限（THRESHOLDS.foldPercent = 80）→ decision=summarize → 主动 ctx.compact
+900K 级兜底：宿主强制压缩，真实公式 contextTokens > contextWindow - reserveTokens
+   （reserveTokens 默认 16384；出处 coding-agent/docs/compaction.md:32、
+     src/core/compaction/branch-summarization.ts:305）
+```
+
+三个钩子（算法全部在 `src/pipeline.ts`，`src/index.ts` 只接线）：
+
+1. **turn_end**：读 `ctx.getContextUsage()`，`decideFold` 判定后向 stderr 打一行
+   诊断；判 `summarize` 时带自定义指令发起 `ctx.compact`（模块级 inFlight 防重入）。
+   此钩子只观察，不直接改会话。
+2. **session_before_compact**（核心接管）：`semanticChunks` 切块 → 每块**原文**写入
+   `archiveDir` 下的 `stamp-<id>.md` → `dedupChunk` 去重 → 去重后仍 >800 token 的块
+   并行走三点摘要（单块失败降级为首行，整体不 throw）→ 返回 `{compaction:{summary}}`，
+   summary = 协议头 + 每块一行 `#STAMP <id> → <路径> — <摘要>`。
+3. **tool_result**：超 20K token 的工具结果先归档全文再投影截断（归档失败则不投影，
+   原文保留在会话里）。
+
+## 安装（三条真实路径）
+
+1. **复制安装**（最直接）：
+   - `src/index.ts` → `~/.stepcode/agent/extensions/context-archive.ts`
+   - `skills/context-archive/` → `~/.stepcode/agent/skills/context-archive/`
+   - 应用内 `/reload` 热载。
+2. **settings.json 引用**：
+   ```json
+   { "extensions": ["/path/to/repo/src/index.ts"], "skills": ["/path/to/repo/skills/context-archive"] }
+   ```
+3. **临时加载**：`step -e ./src/index.ts`（快速验证用）。
+
+项目级放置：`.stepcode/extensions/*.ts`（项目需先信任）、`.stepcode/skills/`。
+关于 marketplace（如实说明）：`/plugin marketplace add owner/repo` +
+`/plugin install <name>` 面向 MCP 型声明（`mcpServers`/`provision` 等）；
+`step.plugin.json` 不含 `entry` 字段——宿主当前不会经 marketplace 装载本扩展的
+TS 入口，真实装载链就是上面的 extension 发现目录。仓库保留
+`.step-plugin/marketplace.json` 与 `.claude-plugin/marketplace.json` 双份同内容
+声明，`source` 遵循缺省规则 `plugins/<name>`。
+
+## 使用
+
+- `/context-archive` —— 打印归档目录、文件数、上次接管时间、当前 usage、CONFIG。
+- `/recall-stamp <stamp>` —— 按 stamp 读回归档原文（stdout 输出）。
+- `recall_by_stamp` 工具 —— 模型侧按 stamp 召回。
+- stderr 诊断行：`[context-archive] usage=... decision=...`（非 UI 消息）。
+
+## 配置
+
+模块顶部 `export const CONFIG`（`src/index.ts` 顶部常量区）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `enterTokens` / `foldPercent` | 100_000 / 80 | 镜像 `pipeline.ts` 的 `THRESHOLDS`，判定实际发生在 `decideFold` 内；要改请改 `src/pipeline.ts` 的 `THRESHOLDS` |
+| `projectionMax` | 20_000 | 工具投影上限，改 `CONFIG.projectionMax` 这一行 |
+| `summarizeMinTokens` | 800 | 触发模型摘要的最小块，改 `CONFIG.summarizeMinTokens` 这一行 |
+
+未选用 `pi.registerFlag`：该 API 仅支持 `boolean | string`
+（`src/core/extensions/types.ts:1382-1395`），且阈值判定封装在 `decideFold` 内、
+无法注入，做成 flag 会给出“可覆盖”的假象，故退化为模块常量。
+
+## 与上游对齐（宿主 API 出处）
+
+- `pi.on("turn_end")` + `ctx.getContextUsage()` —— `examples/extensions/trigger-compact.ts`、`docs/extensions.md:601/1066`、`src/core/extensions/types.ts:332/386/1335`
+- `pi.on("session_before_compact")` 返回 `{compaction:{summary,firstKeptEntryId,tokensBefore}}` —— `examples/extensions/custom-compaction.ts:21-116`、`types.ts:640-650/1217-1220`
+- `pi.on("tool_result")` 返回 `{content}` 改写工具结果 —— `types.ts:1002-1010/1190-1195`、应用点 `src/core/agent-session.ts:533-563`
+- `ctx.compact({customInstructions,onComplete,onError})` 单签名 —— `types.ts:340-344/388`、`docs/extensions.md:1077-1091`
+- `ctx.modelRegistry.complete(model,{systemPrompt,messages},{signal,maxTokens})` —— `examples/extensions/qna.ts:86-90`、`custom-compaction.ts:79-88`；`messages.content` 允许 `string | 块数组`（`packages/providers/src/types.ts:358-362`）
+- `pi.registerTool({name,label,description,parameters,execute})` —— `types.ts:497-546`、`examples/extensions/dynamic-tools.ts`；`parameters` 用纯 JSON Schema（TypeBox 产物即 JSON Schema），不 import `typebox`
+- `pi.registerCommand(name,{description,handler(args,ctx)})` —— `types.ts:1275-1281/1370`、`examples/extensions/trigger-compact.ts:43-49`
+- agentDir：`process.env.STEP_CODING_AGENT_DIR || ~/.stepcode/agent` —— `src/config.ts:197/208-215`
+- 发现目录与 settings 键 —— `docs/extensions.md:109-135`、`docs/skills.md:20-42`（SKILL frontmatter 必填 `name`+`description`）
+
+## 目录
+
+`src/index.ts`（接线）、`src/pipeline.ts`（算法，另建）、`skills/context-archive/`、
+`step.plugin.json`、`.step-plugin/marketplace.json`、`.claude-plugin/marketplace.json`、
+`README.md`、`LICENSE`、`.gitignore`。
+
+## 许可
+
+见 [LICENSE](LICENSE)（agent-shell License v1.0）。
+
+Required Notice: Copyright (c) 2026 uos1231234
+(https://github.com/uos1231234/agent-shell)
