@@ -24,25 +24,35 @@ Step Code（宿主 extension + skill）插件：瀑布式上下文压缩——�
 3. **tool_result**：超 20K token 的工具结果先归档全文再投影截断（归档失败则不投影，
    原文保留在会话里）。
 
-## 安装（三条真实路径）
+## 安装（三条路径，第 3 条为无头实测）
 
-1. **复制安装**（最直接）：
-   - `src/index.ts` → `~/.stepcode/agent/extensions/context-archive.ts`
+1. **复制安装**（官方发现目录，最直接；**两个 TS 文件缺一不可**）：
+   - `src/` 整目录 → `~/.stepcode/agent/extensions/context-archive/{index.ts, pipeline.ts}`
+     （发现规则认子目录 `index.ts`；`import "./pipeline.js"` 指同目录文件，
+     **只复制 index.ts 会加载失败**）
    - `skills/context-archive/` → `~/.stepcode/agent/skills/context-archive/`
    - 应用内 `/reload` 热载。
 2. **settings.json 引用**：
    ```json
    { "extensions": ["/path/to/repo/src/index.ts"], "skills": ["/path/to/repo/skills/context-archive"] }
    ```
-3. **临时加载**：`step -e ./src/index.ts`（快速验证用）。
+3. **临时加载（已无头实测 exit 0）**：
+   `step -e ./src/index.ts -ne --skill ./skills/context-archive -p "..."`
+   —— **`-ne` 必须带**（禁用发现目录、显式 `-e` 仍生效）：否则 `-e` 与已安装副本会
+   重复装载同一扩展（实测同一会话 `activate` 执行 4 次）。
 
 项目级放置：`.stepcode/extensions/*.ts`（项目需先信任）、`.stepcode/skills/`。
-关于 marketplace（如实说明）：`/plugin marketplace add owner/repo` +
-`/plugin install <name>` 面向 MCP 型声明（`mcpServers`/`provision` 等）；
-`step.plugin.json` 不含 `entry` 字段——宿主当前不会经 marketplace 装载本扩展的
-TS 入口，真实装载链就是上面的 extension 发现目录。仓库保留
-`.step-plugin/marketplace.json` 与 `.claude-plugin/marketplace.json` 双份同内容
-声明，`source` 遵循缺省规则 `plugins/<name>`。
+
+关于 marketplace（如实说明）：
+
+- `/plugin marketplace add`、`/plugin install`、`/reload` 是 **TUI 交互命令，
+  `step -p` 无头模式下不会执行**（实测：本地市场目录未创建、`~/.stepcode/plugins`
+  无新插件）——最终安装须在交互界面完成；无头验证只用路径 3。
+- 即使经 marketplace 安装成功，`step.plugin.json` 不含 `entry`，宿主当前也**不会**
+  经 marketplace 装载本扩展的 TS 入口（面向 `mcpServers`/`provision` 声明）——
+  真实装载链就是路径 1/2 的 extension 发现目录。
+- 双 marketplace 声明（`.step-plugin` 与 `.claude-plugin` 同内容）的 `source` 为
+  `"."`（仓库根即插件源，**不是**缺省规则 `plugins/<name>`）。
 
 ## 使用
 
