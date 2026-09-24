@@ -80,6 +80,7 @@ interface ExtensionContext {
 	/** 当前模型，可能未选中；缺失时三点摘要降级为算法层去重 */
 	model?: unknown;
 	modelRegistry?: {
+		find(provider: string, modelId: string): ExtensionContext["model"];
 		complete(
 			model: unknown,
 			context: {
@@ -151,6 +152,8 @@ export const CONFIG = {
 	projectionMax: 20_000,
 	/** 去重后仍超过该 token 数的块才值得花一次模型调用做三点摘要 */
 	summarizeMinTokens: 800,
+	/** 摘要压缩默认模型：优先 step-3.7-flash（便宜），不可用时回退会话模型 */
+	compressionModel: { provider: "step", id: "step-3.7-flash" },
 };
 
 /** ctx.compact 下发的自定义指令：告知宿主采用本插件的三点摘要协议与已归档约定 */
@@ -259,14 +262,27 @@ async function briefOf(
 		return fallback;
 	}
 	try {
-		const response = await ctx.modelRegistry!.complete(
-			ctx.model!,
-			{
-				systemPrompt: "你是上下文压缩器，把给定文本压缩为背景、行动、结论三点摘要，每点一行，不复述细节。",
-				messages: [{ role: "user", content: summaryPrompt(chunkText), timestamp: Date.now() }],
-			},
-			{ signal, maxTokens: 512 },
+		const run = (m: NonNullable<ExtensionContext["model"]>) =>
+			ctx.modelRegistry!.complete(
+				m,
+				{
+					systemPrompt: "你是上下文压缩器，把给定文本压缩为背景、行动、结论三点摘要，每点一行，不复述细节。",
+					messages: [{ role: "user", content: summaryPrompt(chunkText), timestamp: Date.now() }],
+				},
+				{ signal, maxTokens: 512 },
+			);
+		// 压缩模型优先 CONFIG.compressionModel（step-3.7-flash，便宜）：find 不到或调用失败时回退会话模型
+		const preferred = ctx.modelRegistry?.find?.(
+			CONFIG.compressionModel.provider,
+			CONFIG.compressionModel.id,
 		);
+		let response: Awaited<ReturnType<typeof run>>;
+		try {
+			response = await run(preferred ?? ctx.model!);
+		} catch (error) {
+			if (!ctx.model || !preferred || preferred === ctx.model) throw error;
+			response = await run(ctx.model);
+		}
 		return parseSummary(responseText(response.content)) || fallback;
 	} catch {
 		return fallback;
