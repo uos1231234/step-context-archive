@@ -2,10 +2,10 @@ agent-shell License v1.0
 (Based on the PolyForm Small Business License 1.0.0)
 
 Copyright (c) 2026 uos1231234
-(https://github.com/uos1231234/agent-shell)
+(https://github.com/uos1231234/step-context-archive)
 
 Required Notice: Copyright (c) 2026 uos1231234
-(https://github.com/uos1231234/agent-shell)
+(https://github.com/uos1231234/step-context-archive)
 
 Commercial licensing contact: 2424105750@qq.com
 
@@ -31,6 +31,10 @@ All other terms are unchanged from the PolyForm Small Business License
 1.0.0. Because of these modifications this license is not the
 unmodified PolyForm license and will not be identified as such by
 automated license detectors.
+
+The license text is the same text as the agent-shell License v1.0
+(https://github.com/uos1231234/agent-shell); the copyright notice and
+Required Notice line above are set for this project.
 
 ## Acceptance
 
