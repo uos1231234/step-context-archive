@@ -95,19 +95,6 @@ Step Code（宿主 extension + skill）插件：瀑布式上下文压缩——�
 
 ## 许可
 
-本项目采用 **agent-shell License v1.0**，全文见 [LICENSE](LICENSE)——基于
-[PolyForm Small Business License 1.0.0](https://polyformproject.org/licenses/small-business/1.0.0)
-修改而来（改动：小型企业门槛改为 45 人 / 上年营收 2,000 万人民币，并新增商用许可条款）。
+[MIT](LICENSE) © 2026 uos1231234
 
-- **个人与非商业用途**（个人、社区、教育、研究）：免费。
-- **公司**：同时满足「总人数少于 45 人（含雇员与外包）」且「上一纳税年度总营收不超过
-  2,000 万人民币」时免费。
-- **超出上述规模的商业使用**：须先与作者商定商业许可，联系 2424105750@qq.com。
-- **署名要求**：向他人分发本软件时，必须一并传递本许可条款（或指向它的 URL），以及
-  `Required Notice:` 署名行。
-
-Required Notice: Copyright (c) 2026 uos1231234
-(https://github.com/uos1231234/step-context-archive)
-
-本许可文本与 agent-shell 项目共用同一份 `agent-shell License v1.0`（出处
-https://github.com/uos1231234/agent-shell）；上面的版权声明与署名行按本项目填写。
+可自由使用、修改、分发（含商业用途），只需在副本中保留版权声明与许可文本。
