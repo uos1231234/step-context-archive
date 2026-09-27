@@ -1,17 +1,21 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   THRESHOLDS,
-  archiveDir,
   decideFold,
   dedupChunk,
   estimateTokens,
   formatStampLine,
+  legacyArchiveDir,
+  normalizeStampId,
   parseSummary,
+  projectArchiveDir,
+  projectRelativePath,
   projectToolResult,
   semanticChunks,
+  stampFilePath,
   stampOf,
   summaryPrompt,
   writeStamp,
@@ -142,13 +146,61 @@ describe("stampOf", () => {
   });
 });
 
-describe("archiveDir / writeStamp", () => {
-  it("archiveDir 为 agentDir 下的 context-archive", () => {
-    expect(archiveDir("base")).toBe(join("base", "context-archive"));
-    expect(archiveDir(join("D:", "app"))).toBe(join("D:", "app", "context-archive"));
+describe("归档目录", () => {
+  it("projectArchiveDir 为项目内 .stepcode/context-archive", () => {
+    expect(projectArchiveDir("base")).toBe(join("base", ".stepcode", "context-archive"));
+    expect(projectArchiveDir(join("D:", "proj"))).toBe(
+      join("D:", "proj", ".stepcode", "context-archive"),
+    );
   });
 
-  it("writeStamp 实际写盘、返回绝对路径、重复写覆盖", async () => {
+  it("legacyArchiveDir 为 agentDir 下的 context-archive（旧版回落用）", () => {
+    expect(legacyArchiveDir("base")).toBe(join("base", "context-archive"));
+  });
+});
+
+describe("stampFilePath / normalizeStampId", () => {
+  it("接受 12 位 hex id", () => {
+    expect(normalizeStampId("abc123def456")).toBe("abc123def456");
+    expect(stampFilePath("/r", "abc123def456")).toBe(join("/r", "stamp-abc123def456.md"));
+  });
+
+  it("接受市场协议承认的 b 前缀退化短 id", () => {
+    expect(normalizeStampId("b3-202609272200")).toBe("b3-202609272200");
+    expect(normalizeStampId("stamp-b3-202609272200.md")).toBe("b3-202609272200");
+  });
+
+  it("接受文件名与含该文件名的任意路径（项目相对/绝对都取 basename）", () => {
+    expect(normalizeStampId("stamp-abc123def456.md")).toBe("abc123def456");
+    expect(normalizeStampId(".stepcode/context-archive/stamp-abc123def456.md")).toBe(
+      "abc123def456",
+    );
+    expect(normalizeStampId("C:\\proj\\.stepcode\\context-archive\\stamp-abc123def456.md")).toBe(
+      "abc123def456",
+    );
+  });
+
+  it("拒绝非法 id 与路径穿越", () => {
+    expect(normalizeStampId("abc123")).toBeNull();
+    expect(normalizeStampId("../../etc/passwd")).toBeNull();
+    expect(normalizeStampId("b3-2026")).toBeNull();
+    expect(normalizeStampId("bX-202609272200")).toBeNull();
+    expect(normalizeStampId("")).toBeNull();
+  });
+});
+
+describe("projectRelativePath", () => {
+  it("输出项目相对路径且统一正斜杠", () => {
+    const root = resolve("D:", "proj");
+    const file = projectArchiveDir(root) + "\\stamp-abc123def456.md";
+    expect(projectRelativePath(root, file)).toBe(
+      ".stepcode/context-archive/stamp-abc123def456.md",
+    );
+  });
+});
+
+describe("writeStamp", () => {
+  it("实际写盘并返回绝对路径", async () => {
     const dir = await mkdtemp(join(tmpdir(), "sca-"));
     try {
       const stamp = stampOf("k1");
@@ -156,9 +208,32 @@ describe("archiveDir / writeStamp", () => {
       expect(isAbsolute(file)).toBe(true);
       expect(basename(file)).toBe(`stamp-${stamp}.md`);
       expect(await readFile(file, "utf8")).toBe("正文一");
-      const again = await writeStamp(dir, stamp, "正文二");
-      expect(again).toBe(file);
-      expect(await readFile(again, "utf8")).toBe("正文二");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("内容相同的重复写幂等返回同一路径（不报错、不重复写）", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sca-"));
+    try {
+      const stamp = stampOf("k1");
+      const first = await writeStamp(dir, stamp, "同一份");
+      const again = await writeStamp(dir, stamp, "同一份");
+      expect(again).toBe(first);
+      expect(await readFile(first, "utf8")).toBe("同一份");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("内容不同时拒绝覆盖并抛错（市场协议安全红线）", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sca-"));
+    try {
+      const stamp = stampOf("k1");
+      const file = await writeStamp(dir, stamp, "原始内容");
+      await expect(writeStamp(dir, stamp, "被篡改的内容")).rejects.toThrow(/拒绝覆盖/);
+      // 旧内容必须原样保留
+      expect(await readFile(file, "utf8")).toBe("原始内容");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

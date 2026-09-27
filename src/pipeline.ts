@@ -3,8 +3,8 @@
 // 只允许 import node 内置模块，宿主类型一律用本地最小结构接口（鸭子类型）对齐。
 
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { basename, join, relative, resolve, sep } from "node:path";
 
 // ============ 宿主结构的本地最小接口（字段与宿主真实结构对齐） ============
 
@@ -227,17 +227,59 @@ export function stampOf(key: string): string {
   return createHash("sha256").update(key).digest("hex").slice(0, 12);
 }
 
-// 归档目录固定为 agentDir 下的 context-archive
-export function archiveDir(agentDir: string): string {
+// 归档目录：项目内 .stepcode/context-archive/（市场协议约定，跨机器/移仓可解析）
+export function projectArchiveDir(projectRoot: string): string {
+  return join(projectRoot, ".stepcode", "context-archive");
+}
+
+// 旧版归档目录（agentDir 下）。保留用于召回回落：0.1.x 之前的归档写在这里，
+// 迁移后旧文件不搬家，recall 按「新目录优先、旧目录兜底」仍能取回。
+export function legacyArchiveDir(agentDir: string): string {
   return join(agentDir, "context-archive");
 }
 
-// 写入 <dir>/stamp-<stamp>.md（已存在则覆盖为同内容），返回绝对路径
+// 写入 <dir>/stamp-<stamp>.md，返回绝对路径。已存在同名文件不覆盖（见函数体注释）
 export async function writeStamp(dir: string, stamp: string, body: string): Promise<string> {
   const file = resolve(dir, `stamp-${stamp}.md`);
   await mkdir(dir, { recursive: true });
-  await writeFile(file, body, "utf8");
+  try {
+    await writeFile(file, body, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if ((await readFile(file, "utf8")) === body) return file;
+    throw new Error(`归档文件已存在且内容不同，拒绝覆盖：${file}`);
+  }
   return file;
+}
+
+// stamp id 的两种合法形态：12 位小写十六进制为主格式；
+// `b<块序号>-<yyyymmddhhmm>` 退化短 id 是主格式之外的显式例外（靠 b 前缀区分），市场协议已承认。
+const HEX_ID_RE = /^[0-9a-f]{12}$/;
+const FALLBACK_ID_RE = /^b\d+-\d{10,14}$/;
+
+// 归档文件名：stamp-<id>.md。id 不含路径分隔符，杜绝路径穿越。
+export const STAMP_FILE_RE = /^stamp-([0-9a-f]{12}|b\d+-\d{10,14})\.md$/;
+
+// 归档文件绝对路径
+export function stampFilePath(root: string, stamp: string): string {
+  return join(root, `stamp-${stamp}.md`);
+}
+
+/**
+ * 把用户/模型给的 stamp 归一化为 id：接受 12 位 hex、b 前缀退化 id、
+ * `stamp-<id>.md` 文件名，或包含该文件名的任意路径（取 basename）。
+ * 两种 id 形态都不含路径分隔符，配合 basename 双重杜绝路径穿越。
+ */
+export function normalizeStampId(raw: string): string | null {
+  const input = raw.trim();
+  if (HEX_ID_RE.test(input) || FALLBACK_ID_RE.test(input)) return input;
+  const matched = STAMP_FILE_RE.exec(basename(input));
+  return matched ? matched[1] : null;
+}
+
+// 索引行里的路径用项目相对路径 + 正斜杠（跨机器/移仓可解析，跨平台一致）
+export function projectRelativePath(projectRoot: string, file: string): string {
+  return relative(projectRoot, file).split(sep).join("/");
 }
 
 // ============ 三点摘要 prompt 与解析 ============

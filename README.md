@@ -27,9 +27,11 @@ Step Code（宿主 extension + skill）插件：瀑布式上下文压缩——�
    诊断；判 `summarize` 时带自定义指令发起 `ctx.compact`（模块级 inFlight 防重入）。
    此钩子只观察，不直接改会话。
 2. **session_before_compact**（核心接管）：`semanticChunks` 切块 → 每块**原文**写入
-   `archiveDir` 下的 `stamp-<id>.md` → `dedupChunk` 去重 → 去重后仍 >800 token 的块
+   项目内 `.stepcode/context-archive/stamp-<id>.md` → `dedupChunk` 去重 → 去重后仍 >800 token 的块
    并行走三点摘要（单块失败降级为首行，整体不 throw）→ 返回 `{compaction:{summary}}`，
-   summary = 协议头 + 每块一行 `#STAMP <id> → <路径> — <摘要>`。
+   summary = 协议头 + 每块一行 `#STAMP <id> → <项目相对路径> — <摘要>`。
+   归档**不覆盖同名文件**：内容相同幂等跳过，内容不同则拒绝写入且该块不发索引行
+   （宁可只剩摘要，也不给出指向错内容的指针）。
 3. **tool_result**：超 20K token 的工具结果先归档全文再投影截断（归档失败则不投影，
    原文保留在会话里）。
 
@@ -65,7 +67,7 @@ Step Code（宿主 extension + skill）插件：瀑布式上下文压缩——�
 
 ## 使用
 
-- `/context-archive` —— 打印归档目录、文件数、上次接管时间、当前 usage、CONFIG。
+- `/context-archive` —— 打印归档目录（新旧两处）、文件数、上次接管时间、当前 usage、CONFIG。
 - `/recall-stamp <stamp>` —— 按 stamp 读回归档原文（stdout 输出）。
 - `recall_by_stamp` 工具 —— 模型侧按 stamp 召回。
 - stderr 诊断行：`[context-archive] usage=... decision=...`（非 UI 消息）。
@@ -116,7 +118,9 @@ Step Code（宿主 extension + skill）插件：瀑布式上下文压缩——�
 | 形态 | TypeScript 扩展（`src/index.ts` + `src/pipeline.ts`，776 行） | `step.plugin.json` + `commands/*.md` + `skills/*/SKILL.md` |
 | 装载通道 | `~/.stepcode/agent/extensions/`、settings.json、`step -e`（**这条路现在可用**） | `/plugin marketplace add` + `/plugin install`（**装得上但宿主暂不装载**） |
 | 自动触发 | 有：100K 介入线 + 压缩前接管 + 20K 有界投影 | 无：靠模型自觉执行 |
+| 协议 | `#STAMP` 索引行 = **项目相对路径** + 三点摘要「目标 / 关键决策 / 是否完成」+ 承认 `b` 前缀退化 id + 同名文件不覆盖 | 同左（以市场协议为准，本仓库已对齐） |
 | 状态 | v0.1.0，MIT | v1.0.0，in-progress（[PR #1](https://github.com/Neriah-Ado/stepcode-plugins/pull/1) 已合并） |
 
 选哪份：**想要自动压缩用本仓库**（走安装三条路径）；想要“一键装进 Step Code 会话”用市场副本，
-但需等宿主开放插件装载通道。两者共享同一套 `#STAMP` 索引格式与三点摘要协议，可分别独立使用。
+但需等宿主开放插件装载通道。两者共享同一套 `#STAMP` 索引格式与三点摘要协议，
+归档都落在项目内 `.stepcode/context-archive/`，可分别独立使用。

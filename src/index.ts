@@ -9,17 +9,22 @@ import * as path from "node:path";
 
 import {
 	THRESHOLDS,
-	archiveDir,
 	dedupChunk,
 	decideFold,
 	estimateTokens,
 	formatStampLine,
+	legacyArchiveDir,
+	normalizeStampId,
 	parseSummary,
+	projectArchiveDir,
+	projectRelativePath,
 	projectToolResult,
 	semanticChunks,
+	stampFilePath,
 	stampOf,
 	summaryPrompt,
 	writeStamp,
+	STAMP_FILE_RE,
 	type Chunk,
 	type FoldDecision,
 } from "./pipeline.js";
@@ -192,34 +197,29 @@ function resolveAgentDir(): string {
 	return path.join(os.homedir(), ".stepcode", "agent");
 }
 
-const STAMP_FILE_RE = /^stamp-([0-9a-f]{12})\.md$/;
-
-function stampFilePath(root: string, stamp: string): string {
-	return path.join(root, `stamp-${stamp}.md`);
-}
-
-/** 只接受 12 位十六进制 id 或 stamp-<id>.md 文件名，杜绝路径穿越 */
-function normalizeStampId(raw: string): string | null {
-	const input = raw.trim();
-	if (/^[0-9a-f]{12}$/.test(input)) return input;
-	const matched = STAMP_FILE_RE.exec(path.basename(input));
-	return matched ? matched[1] : null;
-}
-
+/**
+ * 按 stamp 读取归档原文。按「新目录优先、旧目录兜底」依次查找，
+ * 让 0.1.x 时代写在 agentDir 下的旧归档在迁移后仍能召回。
+ */
 function readStampText(
-	root: string,
+	roots: string[],
 	raw: string,
 ): { ok: true; text: string; file: string } | { ok: false; error: string } {
 	const id = normalizeStampId(raw);
 	if (!id) {
-		return { ok: false, error: `无效 stamp：${raw}（只允许 12 位十六进制 id 或 stamp-<id>.md 文件名）` };
+		return { ok: false, error: `无效 stamp：${raw}（只允许 12 位十六进制 id、b 前缀退化短 id，或 stamp-<id>.md 文件名）` };
 	}
-	const file = stampFilePath(root, id);
-	try {
-		return { ok: true, text: readFileSync(file, "utf8"), file };
-	} catch {
-		return { ok: false, error: `未找到归档文件：${file}` };
+	const tried: string[] = [];
+	for (const root of roots) {
+		const file = stampFilePath(root, id);
+		tried.push(file);
+		try {
+			return { ok: true, text: readFileSync(file, "utf8"), file };
+		} catch {
+			// 继续试下一个目录
+		}
 	}
+	return { ok: false, error: `未找到归档文件（已查找：${tried.join("、")}）` };
 }
 
 /** 降级摘要：取去重文本首个非空行并截断 */
@@ -294,8 +294,11 @@ async function briefOf(
 // ---------------------------------------------------------------------------
 
 export default function activate(pi: ExtensionAPI): void {
-	const agentDir = resolveAgentDir();
-	const stampRoot = archiveDir(agentDir);
+	const projectRoot = process.cwd();
+	// 新目录写在项目内（市场协议约定，跨机器/移仓可解析）；旧目录只读回落
+	const stampRoot = projectArchiveDir(projectRoot);
+	const legacyRoot = legacyArchiveDir(resolveAgentDir());
+	const readRoots = [stampRoot, legacyRoot];
 
 	// turn_end：只观察与打印一行诊断，不直接改会话。本插件的两个真实改写点是
 	//「压缩接管」（session_before_compact）与「工具投影」（tool_result），
@@ -338,7 +341,7 @@ export default function activate(pi: ExtensionAPI): void {
 			foldDecisionForPreparation(ev, ctx) === "summarize" && !!ctx.model && !!ctx.modelRegistry;
 
 		const chunks: Chunk[] = semanticChunks(ev.branchEntries);
-		const lines = await Promise.all(
+		const settled = await Promise.all(
 			chunks.map(async (chunk) => {
 				const stamp = stampOf(chunk.key);
 				const file = stampFilePath(stampRoot, stamp);
@@ -346,13 +349,18 @@ export default function activate(pi: ExtensionAPI): void {
 				try {
 					await writeStamp(stampRoot, stamp, chunk.text);
 				} catch (error) {
-					process.stderr.write(`[context-archive] 归档失败 ${file}：${String(error)}\n`);
+					// 不发 #STAMP 行：宁可本块只剩摘要，也不给出指向「内容不同」的旧文件的指针
+					process.stderr.write(
+						`[context-archive] 归档失败 ${file}：${String(error)}（本块不发 #STAMP 索引行）\n`,
+					);
+					return null;
 				}
 				const deduped = dedupChunk(chunk.text);
 				const brief = await briefOf(deduped, ctx, useModel, ev.signal);
-				return formatStampLine(stamp, file, brief);
+				return formatStampLine(stamp, projectRelativePath(projectRoot, file), brief);
 			}),
 		);
+		const lines = settled.filter((line): line is string => line !== null);
 
 		return {
 			compaction: {
@@ -381,7 +389,7 @@ export default function activate(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "recall_by_stamp",
 		label: "按 Stamp 召回归档",
-		description: "输入 stamp（12 位十六进制 id 或 stamp-<id>.md 文件名），读取对应归档文件全文并返回",
+		description: "输入 stamp（12 位十六进制 id、b 前缀退化短 id，或 stamp-<id>.md 文件名），读取对应归档文件全文并返回",
 		promptSnippet: "Recall archived pre-compaction context by its 12-hex stamp id",
 		promptGuidelines: [
 			"Use recall_by_stamp when a #STAMP line is referenced and the exact archived text is needed.",
@@ -389,12 +397,15 @@ export default function activate(pi: ExtensionAPI): void {
 		parameters: {
 			type: "object",
 			properties: {
-				stamp: { type: "string", description: "归档 stamp：12 位十六进制 id 或 stamp-<id>.md 文件名" },
+				stamp: {
+					type: "string",
+					description: "归档 stamp：12 位十六进制 id、b 前缀退化短 id，或 stamp-<id>.md 文件名",
+				},
 			},
 			required: ["stamp"],
 		},
 		async execute(_toolCallId, params) {
-			const result = readStampText(stampRoot, String(params.stamp ?? ""));
+			const result = readStampText(readRoots, String(params.stamp ?? ""));
 			if (result.ok) {
 				return { content: [{ type: "text", text: result.text }], details: { file: result.file } };
 			}
@@ -406,7 +417,7 @@ export default function activate(pi: ExtensionAPI): void {
 	pi.registerCommand("recall-stamp", {
 		description: "召回归档块：/recall-stamp <stamp>",
 		handler: async (args, ctx) => {
-			const result = readStampText(stampRoot, args);
+			const result = readStampText(readRoots, args);
 			if (!result.ok) {
 				ctx.ui?.notify(result.error, "error");
 				process.stderr.write(`${result.error}\n`);
@@ -420,12 +431,13 @@ export default function activate(pi: ExtensionAPI): void {
 	pi.registerCommand("context-archive", {
 		description: "查看归档目录、文件数、当前 usage 与 CONFIG",
 		handler: async (_args, ctx) => {
-			let fileCount = 0;
-			try {
-				fileCount = readdirSync(stampRoot).filter((name) => STAMP_FILE_RE.test(name)).length;
-			} catch {
-				fileCount = 0;
-			}
+			const countIn = (root: string): number => {
+				try {
+					return readdirSync(root).filter((name) => STAMP_FILE_RE.test(name)).length;
+				} catch {
+					return 0;
+				}
+			};
 			const usage = ctx.getContextUsage();
 			const usageText = usage
 				? `tokens=${usage.tokens} percent=${usage.percent} contextWindow=${usage.contextWindow}`
@@ -434,7 +446,9 @@ export default function activate(pi: ExtensionAPI): void {
 			process.stdout.write(
 				[
 					`[context-archive] 归档目录：${stampRoot}`,
-					`[context-archive] 归档文件数：${fileCount}`,
+					`[context-archive] 归档文件数：${countIn(stampRoot)}`,
+					`[context-archive] 旧版目录（只读回落）：${legacyRoot}`,
+					`[context-archive] 旧版文件数：${countIn(legacyRoot)}`,
 					`[context-archive] 上次接管压缩：${takeoverText}`,
 					`[context-archive] 当前 usage：${usageText}`,
 					`[context-archive] CONFIG：enterTokens=${CONFIG.enterTokens} foldPercent=${CONFIG.foldPercent} projectionMax=${CONFIG.projectionMax} summarizeMinTokens=${CONFIG.summarizeMinTokens}`,
