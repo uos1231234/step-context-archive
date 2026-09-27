@@ -1,6 +1,15 @@
 # context-archive
 
 Step Code（宿主 extension + skill）插件：瀑布式上下文压缩——算法去重→三点摘要，stamp 归档与召回，有界工具投影。
+> **已被第三方插件市场收录**：[Neriah-Ado/stepcode-plugins](https://github.com/Neriah-Ado/stepcode-plugins)（PR #1 已于 2026-09-27 合并）。
+> 市场里那份是**声明式副本**（清单 + 命令文本 + 技能提示词），与本仓库的**代码版扩展**是同一设计的两份实现。
+> 在 Step Code 会话中：
+>
+> /plugin marketplace add Neriah-Ado/stepcode-plugins
+> /plugin install step-context-archive
+>
+> **注意**：截至 Step Code v0.1.1，市场安装**只交付文件、不装载命令/技能**（宿主未接入加载器）；
+> 要使用本仓库的完整功能，请走下方「安装」三条路径之一。
 
 ## 工作原理
 
@@ -98,3 +107,16 @@ Step Code（宿主 extension + skill）插件：瀑布式上下文压缩——�
 [MIT](LICENSE) © 2026 uos1231234
 
 可自由使用、修改、分发（含商业用途），只需在副本中保留版权声明与许可文本。
+## 与市场副本的关系
+
+同一个设计存在两份实现，**同一份 MIT 许可**：
+
+| | 本仓库（代码版） | [Neriah-Ado/stepcode-plugins](https://github.com/Neriah-Ado/stepcode-plugins)（声明式副本） |
+| --- | --- | --- |
+| 形态 | TypeScript 扩展（`src/index.ts` + `src/pipeline.ts`，776 行） | `step.plugin.json` + `commands/*.md` + `skills/*/SKILL.md` |
+| 装载通道 | `~/.stepcode/agent/extensions/`、settings.json、`step -e`（**这条路现在可用**） | `/plugin marketplace add` + `/plugin install`（**装得上但宿主暂不装载**） |
+| 自动触发 | 有：100K 介入线 + 压缩前接管 + 20K 有界投影 | 无：靠模型自觉执行 |
+| 状态 | v0.1.0，MIT | v1.0.0，in-progress（[PR #1](https://github.com/Neriah-Ado/stepcode-plugins/pull/1) 已合并） |
+
+选哪份：**想要自动压缩用本仓库**（走安装三条路径）；想要“一键装进 Step Code 会话”用市场副本，
+但需等宿主开放插件装载通道。两者共享同一套 `#STAMP` 索引格式与三点摘要协议，可分别独立使用。
