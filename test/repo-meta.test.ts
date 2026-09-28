@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const read = (relative: string): string => readFileSync(new URL(relative, import.meta.url), "utf8");
@@ -16,6 +17,21 @@ describe("仓库元数据（防回归）", () => {
 		const manifest = JSON.parse(read("../step.plugin.json"));
 		expect(manifest.entry).toBeUndefined();
 		expect(manifest.id).toBe("context-archive");
+	});
+
+	it("package.json 声明 pi 清单（step install 装载通道的命门）", () => {
+		const pkg = JSON.parse(read("../package.json"));
+		// 官方 DefaultPackageManager 读 package.json 的 pi 字段决定装载哪些资源
+		expect(pkg.pi.extensions).toEqual(["./src/index.ts"]);
+		expect(pkg.pi.skills).toEqual(["./skills/context-archive"]);
+	});
+
+	it("pi 清单指向的文件真实存在（清单与仓库结构不能漂移）", () => {
+		const pkg = JSON.parse(read("../package.json"));
+		const root = new URL("../", import.meta.url);
+		for (const rel of [...pkg.pi.extensions, ...pkg.pi.skills]) {
+			expect(existsSync(fileURLToPath(new URL(rel, root)))).toBe(true);
+		}
 	});
 
 	it("README 安装说明含 -ne 防重复装载与 pipeline 成对复制", () => {

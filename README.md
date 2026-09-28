@@ -35,33 +35,45 @@ Step Code（宿主 extension + skill）插件：瀑布式上下文压缩——�
 3. **tool_result**：超 20K token 的工具结果先归档全文再投影截断（归档失败则不投影，
    原文保留在会话里）。
 
-## 安装（三条路径，第 3 条为无头实测）
+## 安装（四条路径，第 1 条推荐、第 4 条为无头实测）
 
-1. **复制安装**（官方发现目录，最直接；**两个 TS 文件缺一不可**）：
+1. **`step install`（推荐，官方包管理器，已实测）**：
+   ```
+   step install https://github.com/uos1231234/step-context-archive
+   ```
+   宿主会 clone 仓库、读 `package.json` 的 `pi` 清单、把扩展登记进
+   `~/.stepcode/config.toml` 的 `packages`，并在会话启动时经 resource-loader
+   **真正加载**——`pi.on(...)` 事件钩子照常工作。相关命令：`step list` / `step update` / `step remove`。
+   （依赖 `package.json` 的 `pi.extensions` + `pi.skills` 字段；安装时 `npm install --omit=dev`，不拉 devDependencies。）
+2. **复制安装**（官方发现目录，最直接；**两个 TS 文件缺一不可**）：
    - `src/` 整目录 → `~/.stepcode/agent/extensions/context-archive/{index.ts, pipeline.ts}`
      （发现规则认子目录 `index.ts`；`import "./pipeline.js"` 指同目录文件，
      **只复制 index.ts 会加载失败**）
    - `skills/context-archive/` → `~/.stepcode/agent/skills/context-archive/`
    - 应用内 `/reload` 热载。
-2. **settings.json 引用**：
+3. **settings.json 引用**：
    ```json
    { "extensions": ["/path/to/repo/src/index.ts"], "skills": ["/path/to/repo/skills/context-archive"] }
    ```
-3. **临时加载（已无头实测 exit 0）**：
+4. **临时加载（已无头实测 exit 0）**：
    `step -e ./src/index.ts -ne --skill ./skills/context-archive -p "..."`
    —— **`-ne` 必须带**（禁用发现目录、显式 `-e` 仍生效）：否则 `-e` 与已安装副本会
    重复装载同一扩展（实测同一会话 `activate` 执行 4 次）。
 
 项目级放置：`.stepcode/extensions/*.ts`（项目需先信任）、`.stepcode/skills/`。
 
-关于 marketplace（如实说明）：
+关于 marketplace 与 `step install` 的关系（如实说明）：
 
+- **两条通道是并存的，能力不同**。`step install` 走官方包管理器
+  （`DefaultPackageManager`），装完的扩展由 `resource-loader` **真正加载**，
+  事件钩子可用；`/plugin marketplace add` 走市场门面，**只分发不装载**
+  （`plugins.ts` 原文：*"Executable plugin entries are recorded but not loaded
+  by the Step marketplace facade."*）。**要自动触发请走 `step install`。**
 - `/plugin marketplace add`、`/plugin install`、`/reload` 是 **TUI 交互命令，
   `step -p` 无头模式下不会执行**（实测：本地市场目录未创建、`~/.stepcode/plugins`
-  无新插件）——最终安装须在交互界面完成；无头验证只用路径 3。
-- 即使经 marketplace 安装成功，`step.plugin.json` 不含 `entry`，宿主当前也**不会**
-  经 marketplace 装载本扩展的 TS 入口（面向 `mcpServers`/`provision` 声明）——
-  真实装载链就是路径 1/2 的 extension 发现目录。
+  无新插件）——最终安装须在交互界面完成；无头验证只用路径 4。
+- 市场那份**只交付文件**，不装进扩展通道：`step.plugin.json` 不含 `entry`，
+  宿主不会经 marketplace 装载本扩展的 TS 入口（面向 `mcpServers`/`provision` 声明）。
 - 双 marketplace 声明（`.step-plugin` 与 `.claude-plugin` 同内容）的 `source` 为
   `"."`（仓库根即插件源，**不是**缺省规则 `plugins/<name>`）。
 
