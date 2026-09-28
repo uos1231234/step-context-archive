@@ -1,15 +1,34 @@
 # context-archive
 
 Step Code（宿主 extension + skill）插件：瀑布式上下文压缩——算法去重→三点摘要，stamp 归档与召回，有界工具投影。
-> **已被第三方插件市场收录**：[Neriah-Ado/stepcode-plugins](https://github.com/Neriah-Ado/stepcode-plugins)（PR #1 已于 2026-09-27 合并）。
-> 市场里那份是**声明式副本**（清单 + 命令文本 + 技能提示词），与本仓库的**代码版扩展**是同一设计的两份实现。
-> 在 Step Code 会话中：
->
-> /plugin marketplace add Neriah-Ado/stepcode-plugins
-> /plugin install step-context-archive
->
-> **注意**：截至 Step Code v0.1.1，市场安装**只交付文件、不装载命令/技能**（宿主未接入加载器）；
-> 要使用本仓库的完整功能，请走下方「安装」三条路径之一。
+
+## 一条命令装上完整功能
+
+```bash
+step install https://github.com/uos1231234/step-context-archive
+```
+
+装完即生效：`turn_end` / `session_before_compact` / `tool_result` 三个事件钩子照常工作，
+长会话到 100K 自动介入、压缩前接管归档、20K 工具结果有界投影全部启用。
+装完写进 `~/.stepcode/config.toml` 的 `packages`，**以后每次启动自动校验并更新**。
+（`step list` 查看、`step update --extensions` 更新、`step remove` 卸载。）
+
+> **为什么是 `step install` 而不是 `/plugin marketplace`？**
+> 截至 Step Code v0.1.1，内置市场**只做分发、不装载**——
+> `packages/coding-agent/src/step/plugins.ts` 原文：*"Executable plugin entries are recorded but not loaded
+> by the Step marketplace facade."* 装完市场插件后，清单里的 `commands/` 与 `skills/` 不会变成斜杠命令或技能，
+> **只有内联 `mcpServers` 会启动**。而 `step install` 走的是官方包管理器
+> （`docs/packages.md`），产物经 `resource-loader` 真正加载，事件钩子可用。
+> 详见下方「安装（四条路径）」。
+
+<details>
+<summary>已收录进第三方插件市场（协议副本，非功能通道）</summary>
+
+[Neriah-Ado/stepcode-plugins](https://github.com/Neriah-Ado/stepcode-plugins)（PR #1 已于 2026-09-27 合并）。
+市场里那份是**声明式协议副本**（清单 + 命令文本 + 技能提示词），与本仓库的**代码版扩展**是同一设计的两份实现，
+共享同一套 `#STAMP` 索引格式与三点摘要协议。在该市场安装**不会**让 `/archive` 出现，原因见上。
+
+</details>
 
 ## 工作原理
 
