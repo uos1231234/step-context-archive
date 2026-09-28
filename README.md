@@ -126,9 +126,24 @@ step install https://github.com/uos1231234/step-context-archive
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `enterTokens` / `foldPercent` | 100_000 / 80 | 镜像 `pipeline.ts` 的 `THRESHOLDS`，判定实际发生在 `decideFold` 内；要改请改 `src/pipeline.ts` 的 `THRESHOLDS` |
+| `enterTokens` | `null` | **绝对介入线覆盖**；`null` = 按当前模型的上下文窗口自适应（默认行为） |
+| `enterPercent` | `0.25` | 自适应比例：窗口的百分之多少开始介入 |
+| `enterFloor` | `100_000` | 自适应的绝对下限，防止小窗口下过早介入 |
+| `foldPercent` | 80 | 实际占用达到窗口的这个百分比才发起压缩摘要（镜像 `THRESHOLDS`） |
 | `projectionMax` | 20_000 | 工具投影上限，改 `CONFIG.projectionMax` 这一行 |
 | `summarizeMinTokens` | 800 | 触发模型摘要的最小块，改 `CONFIG.summarizeMinTokens` 这一行 |
+
+**介入线按模型窗口自适应**（`pipeline.ts` 的 `effectiveEnterTokens`）：
+`生效线 = max(enterFloor, contextWindow × enterPercent)`，宿主未给 `contextWindow` 时退化为 `enterFloor`（行为不因缺信息漂移）。
+
+| 模型窗口 | 生效介入线 | 说明 |
+| --- | --- | --- |
+| 128K / 200K / **256K**（step-3.7-flash） | **100K** | 25% 低于下限，被兜到 100K——与 0.2.0 之前行为**完全一致** |
+| **1M**（step-5-preview） | **250K** | 修正旧版固定 100K 只用 10% 窗口就压缩的浪费 |
+| 未知 | 100K | 退化为下限 |
+
+`/context-archive` 面板会显示**本会话实际生效的介入线 + 依据的窗口**，便于换模型后确认。
+`turn_end` 的 stderr 诊断行也带上 `window=` 与 `enter=`。
 
 未选用 `pi.registerFlag`：该 API 仅支持 `boolean | string`
 （`src/core/extensions/types.ts:1382-1395`），且阈值判定封装在 `decideFold` 内、

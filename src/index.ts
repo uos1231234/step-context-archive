@@ -11,6 +11,7 @@ import {
 	THRESHOLDS,
 	dedupChunk,
 	decideFold,
+	effectiveEnterTokens,
 	estimateTokens,
 	formatStampLine,
 	legacyArchiveDir,
@@ -26,6 +27,7 @@ import {
 	writeStamp,
 	STAMP_FILE_RE,
 	type Chunk,
+	type EnterPolicy,
 	type FoldDecision,
 } from "./pipeline.js";
 
@@ -150,8 +152,15 @@ interface ExtensionAPI {
 // ---------------------------------------------------------------------------
 
 export const CONFIG = {
-	/** 介入线与折叠门限：镜像 pipeline 的 THRESHOLDS（decideFold 内部同源使用） */
-	enterTokens: THRESHOLDS.enterTokens,
+	/**
+	 * 介入线策略（按所选模型的上下文窗口自适应，见 pipeline.effectiveEnterTokens）：
+	 * 生效线 = max(enterFloor, contextWindow × enterPercent)；enterTokens 非 null 时直接覆盖。
+	 * 例如 256K 窗口 → 100K（下限兜底，与旧版行为一致）；1M 窗口 → 250K。
+	 */
+	enterTokens: null as number | null,
+	enterPercent: 0.25,
+	enterFloor: 100_000,
+	/** 折叠门限：实际占用达到窗口的这个百分比才发起压缩摘要（镜像 THRESHOLDS） */
 	foldPercent: THRESHOLDS.foldPercent,
 	/** 工具结果投影上限（token），作为 projectToolResult 的 maxTokens */
 	projectionMax: 20_000,
@@ -159,6 +168,19 @@ export const CONFIG = {
 	summarizeMinTokens: 800,
 	/** 摘要压缩默认模型：优先 step-3.7-flash（便宜），不可用时回退会话模型 */
 	compressionModel: { provider: "step", id: "step-3.7-flash" },
+};
+
+/** CONFIG → decideFold 用的策略视图（用 getter 保持单一事实源：改 CONFIG 即改行为） */
+const ENTER_POLICY: EnterPolicy = {
+	get enterTokens() {
+		return CONFIG.enterTokens;
+	},
+	get enterPercent() {
+		return CONFIG.enterPercent;
+	},
+	get floor() {
+		return CONFIG.enterFloor;
+	},
 };
 
 /** ctx.compact 下发的自定义指令：告知宿主采用本插件的三点摘要协议与已归档约定 */
@@ -243,11 +265,14 @@ function responseText(content: Array<{ type: string; text?: string }>): string {
 function foldDecisionForPreparation(ev: SessionBeforeCompactEvent, ctx: ExtensionContext): FoldDecision {
 	const usage = ctx.getContextUsage();
 	if (usage && usage.tokens !== null && usage.percent !== null) {
-		return decideFold(usage);
+		return decideFold(usage, ENTER_POLICY);
 	}
 	if (ev.reason === "overflow") return "summarize";
 	const tokensBefore = ev.preparation?.tokensBefore ?? 0;
-	return tokensBefore >= CONFIG.enterTokens ? "summarize" : "dedup";
+	// 载荷里没有 contextWindow 时用 floor 兜底，保证判定不因缺窗口信息而漂移
+	return tokensBefore >= effectiveEnterTokens(ENTER_POLICY, usage?.contextWindow)
+		? "summarize"
+		: "dedup";
 }
 
 /** 单块三点摘要：模型调用失败或未启用时降级为去重文本首行，整体不 throw */
@@ -306,10 +331,12 @@ export default function activate(pi: ExtensionAPI): void {
 	pi.on("turn_end", (_ev, ctx) => {
 		const usage = ctx.getContextUsage();
 		if (!usage) return;
-		const decision = decideFold(usage);
+		const decision = decideFold(usage, ENTER_POLICY);
 		if (decision === "silent") return;
 		process.stderr.write(
-			`[context-archive] usage=${usage.tokens} percent=${usage.percent} decision=${decision}\n`,
+			`[context-archive] usage=${usage.tokens} window=${usage.contextWindow ?? "?"} ` +
+				`enter=${effectiveEnterTokens(ENTER_POLICY, usage.contextWindow)} ` +
+				`percent=${usage.percent} decision=${decision}\n`,
 		);
 		if (decision !== "summarize") return;
 		// 防重入：compact 未回调前不再发起；异常卡死超过 10 分钟自动放行
@@ -451,7 +478,10 @@ export default function activate(pi: ExtensionAPI): void {
 					`[context-archive] 旧版文件数：${countIn(legacyRoot)}`,
 					`[context-archive] 上次接管压缩：${takeoverText}`,
 					`[context-archive] 当前 usage：${usageText}`,
-					`[context-archive] CONFIG：enterTokens=${CONFIG.enterTokens} foldPercent=${CONFIG.foldPercent} projectionMax=${CONFIG.projectionMax} summarizeMinTokens=${CONFIG.summarizeMinTokens}`,
+					`[context-archive] 生效介入线：${effectiveEnterTokens(ENTER_POLICY, usage?.contextWindow)}` +
+						`（策略 ${CONFIG.enterTokens === null ? `自适应 max(下限 ${CONFIG.enterFloor}, 窗口×${CONFIG.enterPercent})` : `固定 ${CONFIG.enterTokens}`}，` +
+						`本会话窗口 ${usage?.contextWindow ?? "未知"}）`,
+					`[context-archive] CONFIG：enterTokens=${CONFIG.enterTokens} enterPercent=${CONFIG.enterPercent} enterFloor=${CONFIG.enterFloor} foldPercent=${CONFIG.foldPercent} projectionMax=${CONFIG.projectionMax} summarizeMinTokens=${CONFIG.summarizeMinTokens}`,
 					"",
 				].join("\n"),
 			);

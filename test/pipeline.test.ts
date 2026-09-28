@@ -4,8 +4,10 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   THRESHOLDS,
+  DEFAULT_ENTER_POLICY,
   decideFold,
   dedupChunk,
+  effectiveEnterTokens,
   estimateTokens,
   formatStampLine,
   legacyArchiveDir,
@@ -26,10 +28,36 @@ function mixedText(count: number): string {
   return Array.from({ length: count }, (_, i) => `chunk-${i}-xxxxxxxx`).join(" ");
 }
 
-describe("THRESHOLDS", () => {
-  it("介入下限与摘要门限为拍板值", () => {
-    expect(THRESHOLDS.enterTokens).toBe(100_000);
+describe("THRESHOLDS / ENTER_POLICY", () => {
+  it("折叠门限为拍板值 80", () => {
     expect(THRESHOLDS.foldPercent).toBe(80);
+  });
+
+  it("介入策略默认自适应：比例 0.25、绝对下限 100K、无固定覆盖", () => {
+    expect(DEFAULT_ENTER_POLICY.enterTokens).toBeNull();
+    expect(DEFAULT_ENTER_POLICY.enterPercent).toBe(0.25);
+    expect(DEFAULT_ENTER_POLICY.floor).toBe(100_000);
+  });
+});
+
+describe("effectiveEnterTokens（按模型窗口自适应）", () => {
+  it("窗口未知或非正时退化为下限，行为不因缺信息漂移", () => {
+    expect(effectiveEnterTokens(undefined, undefined)).toBe(100_000);
+    expect(effectiveEnterTokens(undefined, 0)).toBe(100_000);
+  });
+
+  it("256K 窗口：25% 只有 64K，被下限兜到 100K —— 与旧版行为逐字节一致", () => {
+    expect(effectiveEnterTokens(undefined, 256_000)).toBe(100_000);
+  });
+
+  it("1M 窗口：25% = 250K，显著高于旧的固定 100K（用户要求：1M 等超过约 256K 再压缩）", () => {
+    expect(effectiveEnterTokens(undefined, 1_000_000)).toBe(250_000);
+  });
+
+  it("显式 enterTokens 非 null 时直接覆盖，忽略窗口与下限", () => {
+    const policy = { enterTokens: 42_000, enterPercent: 0.25, floor: 100_000 };
+    expect(effectiveEnterTokens(policy, 1_000_000)).toBe(42_000);
+    expect(effectiveEnterTokens(policy, undefined)).toBe(42_000);
   });
 });
 
@@ -39,16 +67,21 @@ describe("decideFold", () => {
     expect(decideFold({ tokens: null, percent: null })).toBe("silent");
   });
 
-  it("tokens 未达 100K 一律 silent（即使 percent 已很高）", () => {
-    expect(decideFold({ tokens: 99_999, percent: 85 })).toBe("silent");
+  it("256K 窗口下未达 100K 一律 silent（即使 percent 已很高，与旧版一致）", () => {
+    expect(decideFold({ tokens: 99_999, contextWindow: 256_000, percent: 85 })).toBe("silent");
+  });
+
+  it("1M 窗口下 150K 仍 silent、260K 起介入（自适应抬高了介入线）", () => {
+    expect(decideFold({ tokens: 150_000, contextWindow: 1_000_000, percent: 15 })).toBe("silent");
+    expect(decideFold({ tokens: 260_000, contextWindow: 1_000_000, percent: 26 })).toBe("dedup");
   });
 
   it("tokens 达标但 percent 低于 80 时 dedup", () => {
-    expect(decideFold({ tokens: 100_000, percent: 79 })).toBe("dedup");
+    expect(decideFold({ tokens: 100_000, contextWindow: 256_000, percent: 39 })).toBe("dedup");
   });
 
   it("percent 达到 80 时 summarize", () => {
-    expect(decideFold({ tokens: 100_000, percent: 80 })).toBe("summarize");
+    expect(decideFold({ tokens: 205_000, contextWindow: 256_000, percent: 80 })).toBe("summarize");
   });
 
   it("percent 为 null 时按 tokens/contextWindow 手算", () => {

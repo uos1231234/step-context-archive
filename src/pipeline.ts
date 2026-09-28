@@ -41,15 +41,52 @@ interface CompactionResult {
 // ============ 阈值与三态决策 ============
 
 // 介入下限与摘要门限（用户拍板值）
-export const THRESHOLDS = { enterTokens: 100_000, foldPercent: 80 } as const;
+export const THRESHOLDS = { foldPercent: 80 } as const;
+
+/**
+ * 介入线策略。默认**按所选模型的上下文窗口自适应**——写死一个绝对值在不同窗口下
+ * 要么过早介入（1M 窗口只用 10% 就压缩，巨型窗口被浪费），要么过晚（256K 窗口已超）。
+ * 生效线 = max(floor, contextWindow × enterPercent)；`enterTokens` 非 null 时直接覆盖。
+ */
+export interface EnterPolicy {
+  /** 显式绝对 token 线；null = 按窗口自适应 */
+  enterTokens: number | null;
+  /** 自适应比例：窗口的百分之多少开始介入 */
+  enterPercent: number;
+  /** 自适应的绝对下限，防止小窗口下过早介入 */
+  floor: number;
+}
+
+export const DEFAULT_ENTER_POLICY: EnterPolicy = {
+  enterTokens: null,
+  enterPercent: 0.25,
+  floor: 100_000,
+};
+
+/**
+ * 解算实际生效的介入线。窗口未知（宿主未给 contextWindow）时退化为 floor，
+ * 保证行为不因缺信息而漂移。
+ */
+export function effectiveEnterTokens(
+  policy: EnterPolicy = DEFAULT_ENTER_POLICY,
+  contextWindow?: number,
+): number {
+  if (policy.enterTokens !== null) return policy.enterTokens;
+  if (contextWindow == null || contextWindow <= 0) return policy.floor;
+  return Math.max(policy.floor, Math.round(contextWindow * policy.enterPercent));
+}
 
 export type FoldDecision = "silent" | "dedup" | "summarize";
 
 // 三态决策：silent 不介入 / dedup 算法去重 / summarize 调 LLM 摘要
-export function decideFold(usage: { tokens: number | null; contextWindow?: number; percent: number | null } | undefined): FoldDecision {
+export function decideFold(
+  usage: { tokens: number | null; contextWindow?: number; percent: number | null } | undefined,
+  policy: EnterPolicy = DEFAULT_ENTER_POLICY,
+): FoldDecision {
   if (!usage) return "silent";
   const { tokens, contextWindow, percent } = usage;
-  if (tokens == null || tokens < THRESHOLDS.enterTokens) return "silent";
+  const enterTokens = effectiveEnterTokens(policy, contextWindow);
+  if (tokens == null || tokens < enterTokens) return "silent";
   if (percent != null) return percent >= THRESHOLDS.foldPercent ? "summarize" : "dedup";
   // percent 缺失但 tokens 已知：用 tokens/contextWindow 手算比例补位
   if (contextWindow != null && contextWindow > 0) {
