@@ -26,6 +26,16 @@ describe("仓库元数据（防回归）", () => {
 		expect(pkg.pi.skills).toEqual(["./skills/context-archive"]);
 	});
 
+	it("pi 与 step 两个清单键内容一致（文档正文叫 step、示例与实现叫 pi，双写兜底）", () => {
+		const pkg = JSON.parse(read("../package.json"));
+		expect(pkg.step).toEqual(pkg.pi);
+	});
+
+	it("带 pi-package 关键字（官方 package gallery 的收录标记）", () => {
+		const pkg = JSON.parse(read("../package.json"));
+		expect(pkg.keywords).toContain("pi-package");
+	});
+
 	it("pi 清单指向的文件真实存在（清单与仓库结构不能漂移）", () => {
 		const pkg = JSON.parse(read("../package.json"));
 		const root = new URL("../", import.meta.url);

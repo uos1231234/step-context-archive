@@ -3,11 +3,25 @@
   "version": "0.1.0",
   "license": "MIT",
   "type": "module",
+  "keywords": [
+    "pi-package",
+    "stepcode-plugin",
+    "context-engineering",
+    "compaction"
+  ],
   "scripts": {
     "test": "vitest --run",
     "typecheck": "tsc --noEmit"
   },
   "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills/context-archive"
+    ]
+  },
+  "step": {
     "extensions": [
       "./src/index.ts"
     ],
