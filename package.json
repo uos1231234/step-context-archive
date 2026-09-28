@@ -7,6 +7,14 @@
     "test": "vitest --run",
     "typecheck": "tsc --noEmit"
   },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills/context-archive"
+    ]
+  },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
