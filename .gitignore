@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.log
 *.zip
+
+# 归档产物：会话级数据，不应入库（README「安装」节要求使用者自行 gitignore）
+.stepcode/

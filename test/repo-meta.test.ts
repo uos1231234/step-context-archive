@@ -19,6 +19,16 @@ describe("仓库元数据（防回归）", () => {
 		expect(manifest.id).toBe("context-archive");
 	});
 
+	it("step.plugin.json 声明内联 mcpServers 指向本仓库的提示服务", () => {
+		const manifest = JSON.parse(read("../step.plugin.json"));
+		// 内联 mcpServers 是「市场插件唯一能在运行时触达模型的通道」（宿主不装载 commands/skills）
+		const server = manifest.mcpServers?.["context-archive-status"];
+		expect(server.command).toBe("node");
+		expect(server.args).toEqual(["server/index.mjs"]);
+		expect(existsSync(fileURLToPath(new URL("../server/index.mjs", import.meta.url)))).toBe(true);
+		expect(existsSync(fileURLToPath(new URL("../server/lib.mjs", import.meta.url)))).toBe(true);
+	});
+
 	it("package.json 声明 pi 清单（step install 装载通道的命门）", () => {
 		const pkg = JSON.parse(read("../package.json"));
 		// 官方 DefaultPackageManager 读 package.json 的 pi 字段决定装载哪些资源

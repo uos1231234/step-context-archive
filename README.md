@@ -96,11 +96,28 @@ step install https://github.com/uos1231234/step-context-archive
 - 双 marketplace 声明（`.step-plugin` 与 `.claude-plugin` 同内容）的 `source` 为
   `"."`（仓库根即插件源，**不是**缺省规则 `plugins/<name>`）。
 
+## 安装状态提示服务（`server/`）
+
+因为市场副本装上后**没有任何东西会告诉用户"你装的是壳"**，本仓库在 `step.plugin.json`
+里声明了一个**内联 `mcpServers`**——这是市场插件唯一能在运行时触达模型的通道
+（`mcp.ts` 的 `pi.registerTools`）。
+
+- **工具**：`context_archive_status`（无参数）
+- **行为**：返回「代码版是否已登记在 step 配置里」+「项目内/旧版目录的归档文件数」+
+  未登记时给出**那条能真正生效的 `step install` 命令**
+- **实现**：`server/lib.mjs`（纯逻辑，零依赖）+ `server/index.mjs`（stdio JSON-RPC，
+  协议与 `@modelcontextprotocol/sdk` 兼容），与官方插件集合的写法一致
+- **注意**：安装/卸载含 MCP 的插件后需**重启 Step Code**，用 `/mcp` 查看加载结果
+
+已实测：两种场景（未登记 / 已登记）走 stdio JSON-RPC 握手，`initialize` / `tools/list` /
+`tools/call` 均正常返回，exit 0。
+
 ## 使用
 
 - `/context-archive` —— 打印归档目录（新旧两处）、文件数、上次接管时间、当前 usage、CONFIG。
 - `/recall-stamp <stamp>` —— 按 stamp 读回归档原文（stdout 输出）。
 - `recall_by_stamp` 工具 —— 模型侧按 stamp 召回。
+- `context_archive_status` 工具 —— 查安装状态（见上一节；市场副本安装后可用）。
 - stderr 诊断行：`[context-archive] usage=... decision=...`（非 UI 消息）。
 
 ## 配置
@@ -131,8 +148,9 @@ step install https://github.com/uos1231234/step-context-archive
 
 ## 目录
 
-`src/index.ts`（接线）、`src/pipeline.ts`（算法，另建）、`skills/context-archive/`、
-`step.plugin.json`、`.step-plugin/marketplace.json`、`.claude-plugin/marketplace.json`、
+`src/index.ts`（接线）、`src/pipeline.ts`（算法，另建）、`server/lib.mjs` + `server/index.mjs`
+（安装状态提示服务）、`skills/context-archive/`、`step.plugin.json`、
+`.step-plugin/marketplace.json`、`.claude-plugin/marketplace.json`、
 `README.md`、`LICENSE`、`.gitignore`。
 
 ## 许可
