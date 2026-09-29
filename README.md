@@ -57,6 +57,32 @@ step install https://github.com/uos1231234/step-context-archive
 3. **tool_result**：超 20K token 的工具结果先归档全文再投影截断（归档失败则不投影，
    原文保留在会话里）。
 
+## 验证记录（真实项目，非玩具仓库）
+
+两个真实项目在 **Step Code + step-3.7-flash** 下跑通「长会话 → 压缩接管 → 归档 → 按 stamp 取回早期事实」全链路。
+测试均在 deepswe-eval 的**副本**上进行，未改动原 fixture。
+
+| | 项目 1：Atlas Sync 长程任务 | 项目 2：Effect HttpApi SSE |
+|---|---|---|
+| 目标 | deepswe-eval `agent-shell-long-horizon` | deepswe-eval `repos/effect-sse-httpapi-streaming`（Effect-TS/effect 的一部分，**2240 文件** TS monorepo） |
+| 性质 | 长程基准（跨多阶段的真实开发任务） | 真实工程 feature 请求（响应端 + 请求端 SSE、编解码器、客户端、文档、测试） |
+| 归档产出 | **7 块 / 1067 KB 原文** | **165 块 / 1032.2 KB 原文** |
+| 索引 ↔ 原文一致性 | ✅ 抽查确认全部为块原文 | ✅ **0 缺失、0 字节数不符、0 预览与原文首行不符，165/165 为块原文** |
+| 摘要与原文冲突 | 未发现 | 未发现 |
+| 召回取回细节 | ✅ 不再读文件，答出 30 个文件之前埋设的早期事实 | ✅ 只读 `INDEX.md` → `recall_by_stamp` 取回 → 答出 **33 个文件的完整清单** |
+| 宿主确认 | CompactionEntry `fromHook: true`、`tokensBefore: 228691` | 该次压缩被宿主中止，靠**磁盘索引**兜底完成召回 |
+
+项目 2 还顺带验证了一件事：模型自装依赖、真实改动 7 个文件、3 个测试全部通过——
+**插件与真实工程工作可以共存，不构成干扰。**
+
+### 过程中修掉的三个真问题
+
+1. **异步钩子在压缩被中止时不被等待** → `await writeStamp` 全量丢失（369 条 entries、0 归档）→ 改同步写盘。
+2. **会话并发拆卸会让 `ctx.getContextUsage()` 抛异常**，若无 `try/catch` 会**静默吞掉后续全部逻辑**，表现只是"诊断行打了一行、后面什么都没发生"。
+3. 因此把**不依赖 `ctx` 的同步归档整体前置**到任何 ctx / 模型调用之前；模型摘要阶段单独 `try/catch`，
+   失败只影响摘要、不会影响已落盘的归档。`INDEX.md` 磁盘索引即为此设——压缩被中止、`#STAMP` 没进会话时，
+   原文与可召回清单都还在盘上。
+
 ## 安装（四条路径，第 1 条推荐、第 4 条为无头实测）
 
 1. **`step install`（推荐，官方包管理器，已实测）**：
@@ -192,7 +218,7 @@ step install https://github.com/uos1231234/step-context-archive
 | 装载通道 | `~/.stepcode/agent/extensions/`、settings.json、`step -e`（**这条路现在可用**） | `/plugin marketplace add` + `/plugin install`（**装得上但宿主暂不装载**） |
 | 自动触发 | 有：100K 介入线 + 压缩前接管 + 20K 有界投影 | 无：靠模型自觉执行 |
 | 协议 | `#STAMP` 索引行 = **项目相对路径** + 三点摘要「目标 / 关键决策 / 是否完成」+ 承认 `b` 前缀退化 id + 同名文件不覆盖 | 同左（以市场协议为准，本仓库已对齐） |
-| 状态 | v0.1.0，MIT | v1.0.0，in-progress（[PR #1](https://github.com/Neriah-Ado/stepcode-plugins/pull/1) 已合并） |
+| 状态 | v0.5.2，MIT | v1.0.0，in-progress（[PR #1](https://github.com/Neriah-Ado/stepcode-plugins/pull/1) 已合并；`SCA-100-4` 真实项目验证已完成，已汇报待维护者回写） |
 
 选哪份：**想要自动压缩用本仓库**（走安装三条路径）；想要“一键装进 Step Code 会话”用市场副本，
 但需等宿主开放插件装载通道。两者共享同一套 `#STAMP` 索引格式与三点摘要协议，
