@@ -19,14 +19,21 @@ describe("仓库元数据（防回归）", () => {
 		expect(manifest.id).toBe("context-archive");
 	});
 
-	it("step.plugin.json 声明内联 mcpServers 指向本仓库的提示服务", () => {
+	it("插件清单不含 mcpServers（宿主不注入插件 cwd，相对 args 永远起不来）", () => {
 		const manifest = JSON.parse(read("../step.plugin.json"));
-		// 内联 mcpServers 是「市场插件唯一能在运行时触达模型的通道」（宿主不装载 commands/skills）
-		const server = manifest.mcpServers?.["context-archive-status"];
-		expect(server.command).toBe("node");
-		expect(server.args).toEqual(["server/index.mjs"]);
-		expect(existsSync(fileURLToPath(new URL("../server/index.mjs", import.meta.url)))).toBe(true);
-		expect(existsSync(fileURLToPath(new URL("../server/lib.mjs", import.meta.url)))).toBe(true);
+		// mcp.ts:238-241 不把插件目录作为 cwd 注入；相对 args 会按用户项目 cwd 解析
+		expect(manifest.mcpServers).toBeUndefined();
+	});
+
+	it("插件清单的 description 带 step install 引导（UI 会渲染 description）", () => {
+		const manifest = JSON.parse(read("../step.plugin.json"));
+		// plugins.ts:1445-1446 把 description 交给 /plugin browse、/plugin list 与安装诊断
+		expect(manifest.description).toContain("step install https://github.com/uos1231234/step-context-archive");
+		expect(manifest.description).toContain("市场安装只交付文件");
+	});
+
+	it("仓库里不再有 MCP 提示服务产物", () => {
+		expect(existsSync(fileURLToPath(new URL("../server", import.meta.url)))).toBe(false);
 	});
 
 	it("package.json 声明 pi 清单（step install 装载通道的命门）", () => {

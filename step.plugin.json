@@ -1,17 +1,7 @@
 {
-  "id": "context-archive",
-  "name": "Context Archive",
-  "description": "瀑布式上下文压缩：算法去重→三点摘要，stamp 归档与召回，有界工具投影",
-  "version": "0.3.0",
-  "skills": [
-    "skills/context-archive"
-  ],
-  "mcpServers": {
-    "context-archive-status": {
-      "command": "node",
-      "args": [
-        "server/index.mjs"
-      ]
-    }
-  }
+	"id": "context-archive",
+	"name": "Context Archive",
+	"description": "瀑布式上下文压缩（extension）：100K 自动介入、压缩前归档原文、20K 工具投影。注意：市场安装只交付文件，不装载 commands/skills；启用完整功能请运行 step install https://github.com/uos1231234/step-context-archive",
+	"version": "0.4.0",
+	"skills": ["skills/context-archive"]
 }

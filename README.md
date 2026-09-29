@@ -16,10 +16,10 @@ step install https://github.com/uos1231234/step-context-archive
 > **为什么是 `step install` 而不是 `/plugin marketplace`？**
 > 截至 Step Code v0.1.1，内置市场**只做分发、不装载**——
 > `packages/coding-agent/src/step/plugins.ts` 原文：*"Executable plugin entries are recorded but not loaded
-> by the Step marketplace facade."* 装完市场插件后，清单里的 `commands/` 与 `skills/` 不会变成斜杠命令或技能，
-> **只有内联 `mcpServers` 会启动**。而 `step install` 走的是官方包管理器
+> by the Step marketplace facade."* 装完市场插件后，清单里的 `commands/` 与 `skills/` 不会变成斜杠命令或技能。
+> 而 `step install` 走的是官方包管理器
 > （`docs/packages.md`），产物经 `resource-loader` 真正加载，事件钩子可用。
-> 详见下方「安装（四条路径）」。
+> 详见下方「安装（四条路径）」；从市场安装时的用户引导见「市场副本的用户引导」。
 
 <details>
 <summary>已收录进第三方插件市场（协议副本，非功能通道）</summary>
@@ -96,28 +96,30 @@ step install https://github.com/uos1231234/step-context-archive
 - 双 marketplace 声明（`.step-plugin` 与 `.claude-plugin` 同内容）的 `source` 为
   `"."`（仓库根即插件源，**不是**缺省规则 `plugins/<name>`）。
 
-## 安装状态提示服务（`server/`）
+## 市场副本的用户引导（`step.plugin.json` 的 `description`）
 
-因为市场副本装上后**没有任何东西会告诉用户"你装的是壳"**，本仓库在 `step.plugin.json`
-里声明了一个**内联 `mcpServers`**——这是市场插件唯一能在运行时触达模型的通道
-（`mcp.ts` 的 `pi.registerTools`）。
+市场安装只交付文件，**没有任何东西会在运行时告诉用户"你装的是壳"**。
+本仓库因此把启用指引直接写进插件清单的 `description`——宿主在
+`step/plugins.ts:1445-1446` 会把 `description` 交给 `/plugin browse`、`/plugin list`
+与安装诊断渲染，**这是 v0.1.1 上唯一确定能触达用户的通道**（不依赖 cwd、不依赖 MCP）：
 
-- **工具**：`context_archive_status`（无参数）
-- **行为**：返回「代码版是否已登记在 step 配置里」+「项目内/旧版目录的归档文件数」+
-  未登记时给出**那条能真正生效的 `step install` 命令**
-- **实现**：`server/lib.mjs`（纯逻辑，零依赖）+ `server/index.mjs`（stdio JSON-RPC，
-  协议与 `@modelcontextprotocol/sdk` 兼容），与官方插件集合的写法一致
-- **注意**：安装/卸载含 MCP 的插件后需**重启 Step Code**，用 `/mcp` 查看加载结果
+> 瀑布式上下文压缩（extension）：100K 自动介入、压缩前归档原文、20K 工具投影。
+> 注意：市场安装只交付文件，不装载 commands/skills；
+> 启用完整功能请运行 `step install https://github.com/uos1231234/step-context-archive`
 
-已实测：两种场景（未登记 / 已登记）走 stdio JSON-RPC 握手，`initialize` / `tools/list` /
-`tools/call` 均正常返回，exit 0。
+**曾尝试过内联 `mcpServers` 提示服务，已移除。** 原因（源码定论）：
+`step/mcp.ts:238-241` 构造 `DiscoveredServer` 时**不注入插件目录作为 `cwd`**，
+`:297-303` 的 `StdioClientTransport` 里 `cwd` **只来自声明自身**且 `normalizeDeclaration`
+**不做变量展开**。于是清单里 `args: ["server/index.mjs"]` 这类相对路径会相对
+**用户项目的 cwd** 解析，而非插件目录 → 插件自带的 MCP server 永远起不来。
+清单的 `cwd` 字段也救不了：只能写绝对路径，不可分发。
+（该缺陷对任何用相对 `args` 的插件 MCP server 一视同仁。）
 
 ## 使用
 
 - `/context-archive` —— 打印归档目录（新旧两处）、文件数、上次接管时间、当前 usage、CONFIG。
 - `/recall-stamp <stamp>` —— 按 stamp 读回归档原文（stdout 输出）。
 - `recall_by_stamp` 工具 —— 模型侧按 stamp 召回。
-- `context_archive_status` 工具 —— 查安装状态（见上一节；市场副本安装后可用）。
 - stderr 诊断行：`[context-archive] usage=... decision=...`（非 UI 消息）。
 
 ## 配置
@@ -163,9 +165,8 @@ step install https://github.com/uos1231234/step-context-archive
 
 ## 目录
 
-`src/index.ts`（接线）、`src/pipeline.ts`（算法，另建）、`server/lib.mjs` + `server/index.mjs`
-（安装状态提示服务）、`skills/context-archive/`、`step.plugin.json`、
-`.step-plugin/marketplace.json`、`.claude-plugin/marketplace.json`、
+`src/index.ts`（接线）、`src/pipeline.ts`（算法，另建）、`skills/context-archive/`、
+`step.plugin.json`、`.step-plugin/marketplace.json`、`.claude-plugin/marketplace.json`、
 `README.md`、`LICENSE`、`.gitignore`。
 
 ## 许可
