@@ -388,18 +388,15 @@ export default function activate(pi: ExtensionAPI): void {
 		);
 		if (!ev.preparation) return;
 
-		// 归档不依赖会话信号：块原文已在内存里，本插件只读它、写自己的目录，全程不碰会话。
-		// 因此即使宿主随后中止了压缩，原文也必须先落盘——这是「压缩前归档原文」的核心承诺。
-		lastTakeoverAt = Date.now();
-		const useModel =
-			foldDecisionForPreparation(ev, ctx) === "summarize" && !!ctx.model && !!ctx.modelRegistry;
-
+		// ── 阶段 1：同步归档。刻意不依赖 ctx、不依赖模型、不依赖 signal ──────────
+		// 必须排在最前面：宿主中止压缩时会并发拆卸会话，此时 ctx.getContextUsage()
+		// 可能抛异常、模型调用会立即 aborted；这些一旦先跑，后面真正要保命的落盘
+		// 就全丢了（实测 369 entries 连续 5 次 0 归档，只打出入口诊断那一行）。
 		const chunks: Chunk[] = semanticChunks(ev.branchEntries);
-		const settled: Array<string | null> = [];
+		const failed = new Set<string>();
 		for (const chunk of chunks) {
 			const stamp = stampOf(chunk.key);
 			const file = stampFilePath(stampRoot, stamp);
-			// 同步写盘：宿主中止压缩时不等异步钩子，异步写会直接丢失（实测 365 entries 丢全量）
 			try {
 				writeStampSync(stampRoot, stamp, chunk.text);
 			} catch (error) {
@@ -407,34 +404,56 @@ export default function activate(pi: ExtensionAPI): void {
 				process.stderr.write(
 					`[context-archive] 归档失败 ${file}：${String(error)}（本块不发 #STAMP 索引行）\n`,
 				);
-				settled.push(null);
-				continue;
+				failed.add(stamp);
 			}
-			const deduped = dedupChunk(chunk.text);
-			const brief = await briefOf(deduped, ctx, useModel, ev.signal);
-			settled.push(formatStampLine(stamp, projectRelativePath(projectRoot, file), brief));
 		}
-		const lines = settled.filter((line): line is string => line !== null);
-
-		// 磁盘索引：即使压缩被中止、#STAMP 没进会话，这里也留下人类/模型可读的召回清单
+		const archived = chunks.length - failed.size;
 		const indexPath = writeArchiveIndexSync(stampRoot, (abs) => projectRelativePath(projectRoot, abs));
 
-		// 信号已中止 → 压缩已被宿主取消，不接管摘要（让宿主走它自己的路径），但归档已完成
+		// 信号已中止 → 压缩已被宿主取消，不接管摘要（让宿主走它自己的路径）。
+		// 但原文与索引已在阶段 1 落盘，「压缩前归档原文」不因中止而破。
 		if (ev.signal?.aborted) {
 			process.stderr.write(
-				`[context-archive] 压缩已被宿主中止：已归档 ${lines.length} 个块，索引 ${indexPath}；` +
-					`#STAMP 未进入会话，可从该索引文件查到可召回的块。\n`,
+				`[context-archive] 压缩已被宿主中止：已归档 ${archived}/${chunks.length} 个块，` +
+					`索引 ${indexPath}；#STAMP 未进入会话，可从该索引文件查到可召回的块。\n`,
 			);
 			return;
 		}
 
-		return {
-			compaction: {
-				summary: PROTOCOL_HEADER + lines.join("\n"),
-				firstKeptEntryId: ev.preparation.firstKeptEntryId,
-				tokensBefore: ev.preparation.tokensBefore,
-			},
-		};
+		// ── 阶段 2：接管摘要（依赖 ctx 与模型；失败也不影响已落盘的归档）────────
+		try {
+			lastTakeoverAt = Date.now();
+			const useModel =
+				foldDecisionForPreparation(ev, ctx) === "summarize" && !!ctx.model && !!ctx.modelRegistry;
+			const lines = (
+				await Promise.all(
+					chunks.map(async (chunk) => {
+						const stamp = stampOf(chunk.key);
+						if (failed.has(stamp)) return null;
+						const brief = await briefOf(dedupChunk(chunk.text), ctx, useModel, ev.signal);
+						return formatStampLine(
+							stamp,
+							projectRelativePath(projectRoot, stampFilePath(stampRoot, stamp)),
+							brief,
+						);
+					}),
+				)
+			).filter((line): line is string => line !== null);
+
+			return {
+				compaction: {
+					summary: PROTOCOL_HEADER + lines.join("\n"),
+					firstKeptEntryId: ev.preparation.firstKeptEntryId,
+					tokensBefore: ev.preparation.tokensBefore,
+				},
+			};
+		} catch (error) {
+			// 摘要阶段出错：原文已落盘，如实报告并让宿主走默认压缩，不伪造成功
+			process.stderr.write(
+				`[context-archive] 摘要阶段失败（原文已落盘 ${archived} 块，索引 ${indexPath}）：${String(error)}\n`,
+			);
+			return;
+		}
 	});
 
 	// 压缩失败/被中止时如实报告，不假装成功
