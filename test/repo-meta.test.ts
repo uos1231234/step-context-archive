@@ -32,6 +32,19 @@ describe("仓库元数据（防回归）", () => {
 		expect(manifest.description).toContain("市场安装只交付文件");
 	});
 
+	it("许可为 AGPL-3.0-only 且与所属插件市场集合一致（防口径漂移）", () => {
+		const pkg = JSON.parse(read("../package.json"));
+		const license = read("../LICENSE");
+		// 必须用官方原文，不能自己改写法律文本
+		expect(pkg.license).toBe("AGPL-3.0-only");
+		expect(license).toContain("GNU AFFERO GENERAL PUBLIC LICENSE");
+		expect(license).toContain("Version 3, 19 November 2007");
+		// AGPL 的标志性条款：网络服务场景也要求提供源码
+		expect(license).toContain("13. Remote Network Interaction");
+		// 不得残留 MIT 声明
+		expect(license).not.toMatch(/^MIT License/m);
+	});
+
 	it("仓库里不再有 MCP 提示服务产物", () => {
 		expect(existsSync(fileURLToPath(new URL("../server", import.meta.url)))).toBe(false);
 	});

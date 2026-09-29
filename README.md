@@ -205,12 +205,19 @@ step install https://github.com/uos1231234/step-context-archive
 
 ## 许可
 
-[MIT](LICENSE) © 2026 uos1231234
+[AGPL-3.0-only](LICENSE) © 2026 uos1231234
 
-可自由使用、修改、分发（含商业用途），只需在副本中保留版权声明与许可文本。
+- **自 v0.6.0 起由 MIT 改为 AGPL-3.0-only**，与所属插件市场的集合许可保持一致，
+  避免用户看到同一设计的两份实现却挂着不同许可而产生困惑。
+- 更早的版本（≤ v0.5.2）以 MIT 发布；那些版本的内容**继续按 MIT**，
+  MIT 允许著作权人后续另行许可，故不构成追溯冲突。
+- AGPL 的关键条款是 **§13 Remote Network Interaction**：把本程序改成网络服务对外提供时，
+  必须向使用者提供你的修改源码。修改与分发本程序时，同样需保持本许可并公开你的改动。
+- 完整条款见 [LICENSE](LICENSE)（GNU AGPL v3 官方原文，未作任何改动）。
+
 ## 与市场副本的关系
 
-同一个设计存在两份实现，**同一份 MIT 许可**：
+同一个设计的两份实现，**同一份 AGPL-3.0-only 许可**：
 
 | | 本仓库（代码版） | [Neriah-Ado/stepcode-plugins](https://github.com/Neriah-Ado/stepcode-plugins)（声明式副本） |
 | --- | --- | --- |
@@ -218,7 +225,7 @@ step install https://github.com/uos1231234/step-context-archive
 | 装载通道 | `~/.stepcode/agent/extensions/`、settings.json、`step -e`（**这条路现在可用**） | `/plugin marketplace add` + `/plugin install`（**装得上但宿主暂不装载**） |
 | 自动触发 | 有：100K 介入线 + 压缩前接管 + 20K 有界投影 | 无：靠模型自觉执行 |
 | 协议 | `#STAMP` 索引行 = **项目相对路径** + 三点摘要「目标 / 关键决策 / 是否完成」+ 承认 `b` 前缀退化 id + 同名文件不覆盖 | 同左（以市场协议为准，本仓库已对齐） |
-| 状态 | v0.5.2，MIT | v1.0.0，in-progress（[PR #1](https://github.com/Neriah-Ado/stepcode-plugins/pull/1) 已合并；`SCA-100-4` 真实项目验证已完成，已汇报待维护者回写） |
+| 状态 | v0.6.0，AGPL-3.0-only | v1.0.0，in-progress（[PR #1](https://github.com/Neriah-Ado/stepcode-plugins/pull/1) 已合并；`SCA-100-4` 真实项目验证已完成，已汇报待维护者回写） |
 
 选哪份：**想要自动压缩用本仓库**（走安装三条路径）；想要“一键装进 Step Code 会话”用市场副本，
 但需等宿主开放插件装载通道。两者共享同一套 `#STAMP` 索引格式与三点摘要协议，

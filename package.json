@@ -1,7 +1,7 @@
 {
   "name": "step-context-archive",
-  "version": "0.5.2",
-  "license": "MIT",
+  "version": "0.6.0",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "keywords": [
     "pi-package",
