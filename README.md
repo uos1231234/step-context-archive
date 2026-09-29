@@ -51,6 +51,9 @@ step install https://github.com/uos1231234/step-context-archive
    summary = 协议头 + 每块一行 `#STAMP <id> → <项目相对路径> — <摘要>`。
    归档**不覆盖同名文件**：内容相同幂等跳过，内容不同则拒绝写入且该块不发索引行
    （宁可只剩摘要，也不给出指向错内容的指针）。
+   每次归档后重写 `.stepcode/context-archive/INDEX.md` 磁盘索引；**即使压缩被宿主中止
+   （`signal.aborted`），原文与索引仍会落盘，只是不接管摘要**——保证「压缩前归档原文」
+   这个承诺在任何路径下都不破。
 3. **tool_result**：超 20K token 的工具结果先归档全文再投影截断（归档失败则不投影，
    原文保留在会话里）。
 
@@ -120,7 +123,12 @@ step install https://github.com/uos1231234/step-context-archive
 - `/context-archive` —— 打印归档目录（新旧两处）、文件数、上次接管时间、当前 usage、CONFIG。
 - `/recall-stamp <stamp>` —— 按 stamp 读回归档原文（stdout 输出）。
 - `recall_by_stamp` 工具 —— 模型侧按 stamp 召回。
-- stderr 诊断行：`[context-archive] usage=... decision=...`（非 UI 消息）。
+- `.stepcode/context-archive/INDEX.md` —— **磁盘召回索引**（自动生成）：列出所有可召回块的
+  stamp、相对路径、字节数与原文首行。压缩被中止、`#STAMP` 没进会话时，靠它仍能查到可召回什么。
+- stderr 诊断行：
+  - `[context-archive] usage=… window=… enter=… percent=… decision=…`（阈值判定）
+  - `[context-archive] session_before_compact reason=… preparation=… aborted=… entries=…`（接管入口）
+  - `[context-archive] session_compact_failed reason=… aborted=… fromExtension=…`（压缩失败/被中止，如实报告不假装成功）
 
 ## 配置
 

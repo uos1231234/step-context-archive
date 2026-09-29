@@ -189,6 +189,74 @@ describe("turn_end 阈值判定（真实处理器）", () => {
 	});
 });
 
+	it("信号被中止时仍归档 + 写磁盘索引，但不接管摘要（原文不丢、也不假装接管）", async () => {
+		const h = mount();
+		const controller = new AbortController();
+		controller.abort(); // 模拟宿主已取消这次压缩
+		const result = await h.fire(
+			"session_before_compact",
+			{
+				type: "session_before_compact",
+				preparation: { firstKeptEntryId: "e1", tokensBefore: 230_000 },
+				branchEntries: branch([{ id: "e1", role: "user", text: "被中止也要留住的原文" }]),
+				reason: "threshold",
+				signal: controller.signal,
+			},
+			ctxWith({ tokens: 230_000, contextWindow: 262_144, percent: 88 }),
+		);
+
+		// 不接管摘要
+		expect(result).toBeUndefined();
+		// 但原文必须已经落盘
+		const dir = join(project, ".stepcode", "context-archive");
+		const files = readdirSync(dir).filter((n) => n.startsWith("stamp-"));
+		expect(files).toHaveLength(1);
+		expect(readFileSync(join(dir, files[0]), "utf8")).toContain("被中止也要留住的原文");
+		// 且磁盘索引存在，模型下次读项目就能知道能召回什么
+		const index = readFileSync(join(dir, "INDEX.md"), "utf8");
+		expect(index).toContain("recall_by_stamp");
+		expect(index).toContain(files[0].slice("stamp-".length, -".md".length));
+		expect(index).toContain("被中止也要留住的原文");
+	});
+
+	it("session_compact_failed 被如实记录（不假装成功）", async () => {
+		const h = mount();
+		const seen: any[] = [];
+		const write = process.stderr.write.bind(process.stderr);
+		(process.stderr as any).write = (chunk: any) => {
+			seen.push(String(chunk));
+			return true;
+		};
+		try {
+			await h.fire("session_compact_failed", {
+				type: "session_compact_failed",
+				reason: "overflow",
+				aborted: true,
+				fromExtension: false,
+			});
+		} finally {
+			(process.stderr as any).write = write;
+		}
+		expect(seen.join("")).toContain("session_compact_failed");
+		expect(seen.join("")).toContain("aborted=yes");
+	});
+
+	it("正常路径也写磁盘索引（与 #STAMP 双通道，互不依赖）", async () => {
+		const h = mount();
+		await h.fire(
+			"session_before_compact",
+			{
+				type: "session_before_compact",
+				preparation: { firstKeptEntryId: "e1", tokensBefore: 1 },
+				branchEntries: branch([{ id: "e1", role: "user", text: "第一行提要\n第二行" }]),
+			},
+			ctxWith({ tokens: 1, contextWindow: 262_144, percent: 1 }),
+		);
+		const index = readFileSync(join(project, ".stepcode", "context-archive", "INDEX.md"), "utf8");
+		expect(index).toContain("第一行提要");
+		expect(index).not.toContain("第二行"); // 提要只取首个非空行
+	});
+
 describe("工具与命令注册", () => {
 	it("注册 recall_by_stamp 工具与两条命令", () => {
 		const h = mount();

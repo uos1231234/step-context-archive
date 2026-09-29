@@ -3,7 +3,7 @@
 // 只允许 import node 内置模块，宿主类型一律用本地最小结构接口（鸭子类型）对齐。
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 
 // ============ 宿主结构的本地最小接口（字段与宿主真实结构对齐） ============
@@ -317,6 +317,94 @@ export function normalizeStampId(raw: string): string | null {
 // 索引行里的路径用项目相对路径 + 正斜杠（跨机器/移仓可解析，跨平台一致）
 export function projectRelativePath(projectRoot: string, file: string): string {
   return relative(projectRoot, file).split(sep).join("/");
+}
+
+// ============ 召回索引（INDEX.md） ============
+
+export interface ArchiveIndexEntry {
+	stamp: string;
+	/** 项目相对路径 */
+	path: string;
+	bytes: number;
+	/** 原文首个非空行，截断后作为一行提要 */
+	firstLine: string;
+}
+
+/** 索引文件名（放在归档目录内，与 stamp 文件同级） */
+export const ARCHIVE_INDEX_FILE = "INDEX.md";
+
+/** 提要行截断长度（够认出一个块，又不至于把索引撑爆） */
+const INDEX_PREVIEW_CHARS = 120;
+
+/** 从归档原文取首个非空行并截断（纯函数，可测） */
+export function archivePreview(text: string): string {
+	const line = text.split(/\r?\n/).find((candidate) => candidate.trim().length > 0) ?? "";
+	return line.trim().slice(0, INDEX_PREVIEW_CHARS);
+}
+
+/**
+ * 渲染召回索引。**为什么需要它**：压缩被宿主中止时，`#STAMP` 索引行不会进入会话上下文，
+ * 模型就不知道有哪些块可召回。这里在磁盘上留一份人类/模型都能读的清单，
+ * 让「原文已落盘」这件事在任何情况下都可被发现。
+ */
+export function renderArchiveIndex(entries: ArchiveIndexEntry[]): string {
+	const lines = [
+		"# context-archive 召回索引",
+		"",
+		"> 本文件由插件自动生成。它列出本项目已归档的历史任务块。",
+		"> 需要某块的完整原文时，用 `recall_by_stamp(stamp)` 或 `/recall-stamp <stamp>` 按 stamp 取回；",
+		"> 摘要只是导航，一切以归档原文为准。",
+		"",
+	];
+	if (entries.length === 0) {
+		lines.push("（暂无归档）", "");
+		return lines.join("\n");
+	}
+	lines.push("| stamp | 文件 | 字节 | 原文首行 |", "| --- | --- | ---: | --- |");
+	for (const entry of entries) {
+		// 管道符会破坏 Markdown 表格
+		const preview = entry.firstLine.replace(/\|/g, "\\|");
+		lines.push(`| \`${entry.stamp}\` | \`${entry.path}\` | ${entry.bytes} | ${preview} |`);
+	}
+	lines.push("");
+	return lines.join("\n");
+}
+
+/**
+ * 扫描归档目录、重写 INDEX.md。幂等：每次都从磁盘现状重建，
+ * 因此删掉归档文件后索引自动收敛，不会残留指向已删文件的条目。
+ * @returns 索引文件的项目相对路径（写入失败时返回兜底相对路径，不抛错）
+ */
+export async function writeArchiveIndex(dir: string, toProjectRelative: (abs: string) => string): Promise<string> {
+	const indexPath = resolve(dir, ARCHIVE_INDEX_FILE);
+	const fallback = toProjectRelative(indexPath);
+	let names: string[];
+	try {
+		names = await readdir(dir);
+	} catch {
+		names = [];
+	}
+	const entries: ArchiveIndexEntry[] = [];
+	for (const name of names.sort()) {
+		if (!STAMP_FILE_RE.test(name)) continue;
+		const abs = join(dir, name);
+		let bytes = 0;
+		let firstLine = "";
+		try {
+			bytes = (await stat(abs)).size;
+			firstLine = archivePreview(await readFile(abs, "utf8"));
+		} catch {
+			// 单个文件读不了就跳过该条，不让索引失败拖垮归档
+			continue;
+		}
+		entries.push({ stamp: name.slice("stamp-".length, -".md".length), path: toProjectRelative(abs), bytes, firstLine });
+	}
+	try {
+		await writeFile(indexPath, renderArchiveIndex(entries), "utf8");
+	} catch {
+		// 索引写不了不影响归档本体，如实忽略（调用方会把路径打进诊断行）
+	}
+	return fallback;
 }
 
 // ============ 三点摘要 prompt 与解析 ============

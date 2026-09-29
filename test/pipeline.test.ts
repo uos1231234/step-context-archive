@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   THRESHOLDS,
   DEFAULT_ENTER_POLICY,
+  archivePreview,
   decideFold,
   dedupChunk,
   effectiveEnterTokens,
@@ -16,6 +17,7 @@ import {
   projectArchiveDir,
   projectRelativePath,
   projectToolResult,
+  renderArchiveIndex,
   semanticChunks,
   stampFilePath,
   stampOf,
@@ -348,6 +350,27 @@ describe("projectToolResult", () => {
     const r = projectToolResult(content, 1, stamp);
     expect(r.projected).toBe(false);
     expect(r.content).toEqual(content);
+  });
+});
+
+describe("召回索引（INDEX.md）", () => {
+  it("archivePreview 取首个非空行并截断", () => {
+    expect(archivePreview("\n\n  第一行提要  \n第二行")).toBe("第一行提要");
+    expect(archivePreview("x".repeat(300)).length).toBe(120);
+    expect(archivePreview("")).toBe("");
+  });
+
+  it("renderArchiveIndex 输出可读表格并转义管道符", () => {
+    const md = renderArchiveIndex([
+      { stamp: "abc123def456", path: ".stepcode/context-archive/stamp-abc123def456.md", bytes: 120, firstLine: "a | b" },
+    ]);
+    expect(md).toContain("recall_by_stamp");
+    expect(md).toContain("| `abc123def456` | `.stepcode/context-archive/stamp-abc123def456.md` | 120 |");
+    expect(md).toContain("a \\| b"); // 管道符必须转义，否则表格被破坏
+  });
+
+  it("无归档时如实写「暂无归档」", () => {
+    expect(renderArchiveIndex([])).toContain("（暂无归档）");
   });
 });
 

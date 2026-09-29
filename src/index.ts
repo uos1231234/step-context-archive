@@ -24,6 +24,7 @@ import {
 	stampFilePath,
 	stampOf,
 	summaryPrompt,
+	writeArchiveIndex,
 	writeStamp,
 	STAMP_FILE_RE,
 	type Chunk,
@@ -59,6 +60,18 @@ interface SessionBeforeCompactEvent {
 	reason?: "manual" | "threshold" | "overflow";
 	willRetry?: boolean;
 	signal?: AbortSignal;
+}
+
+/** 压缩失败/被中止（extensions.md:484-490） */
+interface SessionCompactFailedEvent {
+	type: "session_compact_failed";
+	reason: "manual" | "threshold" | "overflow";
+	/** true 表示这次压缩是被取消/中止的 */
+	aborted?: boolean;
+	/** true 表示当时正在使用扩展提供的压缩内容 */
+	fromExtension?: boolean;
+	errorMessage?: string;
+	willRetry?: boolean;
 }
 
 interface SessionBeforeCompactResult {
@@ -136,6 +149,10 @@ interface ExtensionAPI {
 			ev: ToolResultEvent,
 			ctx: ExtensionContext,
 		) => Promise<ToolResultEventResult | undefined> | ToolResultEventResult | undefined,
+	): void;
+	on(
+		event: "session_compact_failed",
+		handler: (ev: SessionCompactFailedEvent) => void,
 	): void;
 	registerTool(tool: ToolSpec): void;
 	registerCommand(
@@ -361,8 +378,17 @@ export default function activate(pi: ExtensionAPI): void {
 	// 核心接管：归档原文 + 生成带 #STAMP 行的压缩摘要。
 	// 防抖策略：不拦截 manual 连点（用户意志优先），只记录接管时间供诊断。
 	pi.on("session_before_compact", async (ev, ctx) => {
-		// preparation 缺失或信号已中止时不返回 compaction，让宿主走默认压缩路径
-		if (!ev.preparation || ev.signal?.aborted) return;
+		// 入口诊断：如实记录本插件看到了什么（是否被调用、preparation 在不在、信号是否已中止）
+		process.stderr.write(
+			`[context-archive] session_before_compact reason=${ev.reason ?? "?"} ` +
+				`preparation=${ev.preparation ? "yes" : "no"} ` +
+				`aborted=${ev.signal?.aborted ? "yes" : "no"} ` +
+				`willRetry=${ev.willRetry ? "yes" : "no"} entries=${ev.branchEntries.length}\n`,
+		);
+		if (!ev.preparation) return;
+
+		// 归档不依赖会话信号：块原文已在内存里，本插件只读它、写自己的目录，全程不碰会话。
+		// 因此即使宿主随后中止了压缩，原文也必须先落盘——这是「压缩前归档原文」的核心承诺。
 		lastTakeoverAt = Date.now();
 		const useModel =
 			foldDecisionForPreparation(ev, ctx) === "summarize" && !!ctx.model && !!ctx.modelRegistry;
@@ -389,6 +415,20 @@ export default function activate(pi: ExtensionAPI): void {
 		);
 		const lines = settled.filter((line): line is string => line !== null);
 
+		// 磁盘索引：即使压缩被中止、#STAMP 没进会话，这里也留下人类/模型可读的召回清单
+		const indexPath = await writeArchiveIndex(stampRoot, (abs) =>
+			projectRelativePath(projectRoot, abs),
+		);
+
+		// 信号已中止 → 压缩已被宿主取消，不接管摘要（让宿主走它自己的路径），但归档已完成
+		if (ev.signal?.aborted) {
+			process.stderr.write(
+				`[context-archive] 压缩已被宿主中止：已归档 ${lines.length} 个块，索引 ${indexPath}；` +
+					`#STAMP 未进入会话，可从该索引文件查到可召回的块。\n`,
+			);
+			return;
+		}
+
 		return {
 			compaction: {
 				summary: PROTOCOL_HEADER + lines.join("\n"),
@@ -396,6 +436,15 @@ export default function activate(pi: ExtensionAPI): void {
 				tokensBefore: ev.preparation.tokensBefore,
 			},
 		};
+	});
+
+	// 压缩失败/被中止时如实报告，不假装成功
+	pi.on("session_compact_failed", async (ev) => {
+		process.stderr.write(
+			`[context-archive] session_compact_failed reason=${ev.reason} ` +
+				`aborted=${ev.aborted ? "yes" : "no"} fromExtension=${ev.fromExtension ? "yes" : "no"}` +
+				`${ev.errorMessage ? ` error=${ev.errorMessage}` : ""}\n`,
+		);
 	});
 
 	// 有界工具投影：先归档全文，归档成功才投影；归档失败则放行原文，宁可占上下文也不丢数据
