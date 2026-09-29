@@ -3,7 +3,8 @@
 // 只允许 import node 内置模块，宿主类型一律用本地最小结构接口（鸭子类型）对齐。
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 
 // ============ 宿主结构的本地最小接口（字段与宿主真实结构对齐） ============
@@ -319,6 +320,27 @@ export function projectRelativePath(projectRoot: string, file: string): string {
   return relative(projectRoot, file).split(sep).join("/");
 }
 
+/**
+ * 同步写盘版本，语义与 writeStamp 完全一致（wx 不覆盖 + 同内容幂等）。
+ *
+ * 为什么必须有同步版：宿主在中止压缩时**不会等异步钩子跑完**就继续走甚至退出进程，
+ * 实测（365 条 branchEntries）await writeStamp 的落盘直接丢失，归档目录都没建成。
+ * 压缩接管是"一次性、不可重来"的时刻，用同步写换"一定写完"是划算的：
+ * 单次阻塞量级为本次归档的原文体积（实测 7 块 / 1.07MB 也在毫秒级）。
+ */
+export function writeStampSync(dir: string, stamp: string, body: string): string {
+  const file = resolve(dir, `stamp-${stamp}.md`);
+  mkdirSync(dir, { recursive: true });
+  try {
+    writeFileSync(file, body, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (readFileSync(file, "utf8") === body) return file;
+    throw new Error(`归档文件已存在且内容不同，拒绝覆盖：${file}`);
+  }
+  return file;
+}
+
 // ============ 召回索引（INDEX.md） ============
 
 export interface ArchiveIndexEntry {
@@ -375,12 +397,11 @@ export function renderArchiveIndex(entries: ArchiveIndexEntry[]): string {
  * 因此删掉归档文件后索引自动收敛，不会残留指向已删文件的条目。
  * @returns 索引文件的项目相对路径（写入失败时返回兜底相对路径，不抛错）
  */
-export async function writeArchiveIndex(dir: string, toProjectRelative: (abs: string) => string): Promise<string> {
+export function writeArchiveIndexSync(dir: string, toProjectRelative: (abs: string) => string): string {
 	const indexPath = resolve(dir, ARCHIVE_INDEX_FILE);
-	const fallback = toProjectRelative(indexPath);
-	let names: string[];
+	let names: string[] = [];
 	try {
-		names = await readdir(dir);
+		names = readdirSync(dir);
 	} catch {
 		names = [];
 	}
@@ -391,8 +412,8 @@ export async function writeArchiveIndex(dir: string, toProjectRelative: (abs: st
 		let bytes = 0;
 		let firstLine = "";
 		try {
-			bytes = (await stat(abs)).size;
-			firstLine = archivePreview(await readFile(abs, "utf8"));
+			bytes = statSync(abs).size;
+			firstLine = archivePreview(readFileSync(abs, "utf8"));
 		} catch {
 			// 单个文件读不了就跳过该条，不让索引失败拖垮归档
 			continue;
@@ -400,11 +421,12 @@ export async function writeArchiveIndex(dir: string, toProjectRelative: (abs: st
 		entries.push({ stamp: name.slice("stamp-".length, -".md".length), path: toProjectRelative(abs), bytes, firstLine });
 	}
 	try {
-		await writeFile(indexPath, renderArchiveIndex(entries), "utf8");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(indexPath, renderArchiveIndex(entries), "utf8");
 	} catch {
-		// 索引写不了不影响归档本体，如实忽略（调用方会把路径打进诊断行）
+		// 索引写不了不影响归档本体；诊断行里仍会打印它的路径，如实告知
 	}
-	return fallback;
+	return toProjectRelative(indexPath);
 }
 
 // ============ 三点摘要 prompt 与解析 ============

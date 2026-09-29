@@ -24,8 +24,9 @@ import {
 	stampFilePath,
 	stampOf,
 	summaryPrompt,
-	writeArchiveIndex,
+	writeArchiveIndexSync,
 	writeStamp,
+	writeStampSync,
 	STAMP_FILE_RE,
 	type Chunk,
 	type EnterPolicy,
@@ -394,31 +395,29 @@ export default function activate(pi: ExtensionAPI): void {
 			foldDecisionForPreparation(ev, ctx) === "summarize" && !!ctx.model && !!ctx.modelRegistry;
 
 		const chunks: Chunk[] = semanticChunks(ev.branchEntries);
-		const settled = await Promise.all(
-			chunks.map(async (chunk) => {
-				const stamp = stampOf(chunk.key);
-				const file = stampFilePath(stampRoot, stamp);
-				// 归档写入的是原文（非去重版）：召回时必须看到未被去重损毁的完整上下文
-				try {
-					await writeStamp(stampRoot, stamp, chunk.text);
-				} catch (error) {
-					// 不发 #STAMP 行：宁可本块只剩摘要，也不给出指向「内容不同」的旧文件的指针
-					process.stderr.write(
-						`[context-archive] 归档失败 ${file}：${String(error)}（本块不发 #STAMP 索引行）\n`,
-					);
-					return null;
-				}
-				const deduped = dedupChunk(chunk.text);
-				const brief = await briefOf(deduped, ctx, useModel, ev.signal);
-				return formatStampLine(stamp, projectRelativePath(projectRoot, file), brief);
-			}),
-		);
+		const settled: Array<string | null> = [];
+		for (const chunk of chunks) {
+			const stamp = stampOf(chunk.key);
+			const file = stampFilePath(stampRoot, stamp);
+			// 同步写盘：宿主中止压缩时不等异步钩子，异步写会直接丢失（实测 365 entries 丢全量）
+			try {
+				writeStampSync(stampRoot, stamp, chunk.text);
+			} catch (error) {
+				// 不发 #STAMP 行：宁可本块只剩摘要，也不给出指向「内容不同」的旧文件的指针
+				process.stderr.write(
+					`[context-archive] 归档失败 ${file}：${String(error)}（本块不发 #STAMP 索引行）\n`,
+				);
+				settled.push(null);
+				continue;
+			}
+			const deduped = dedupChunk(chunk.text);
+			const brief = await briefOf(deduped, ctx, useModel, ev.signal);
+			settled.push(formatStampLine(stamp, projectRelativePath(projectRoot, file), brief));
+		}
 		const lines = settled.filter((line): line is string => line !== null);
 
 		// 磁盘索引：即使压缩被中止、#STAMP 没进会话，这里也留下人类/模型可读的召回清单
-		const indexPath = await writeArchiveIndex(stampRoot, (abs) =>
-			projectRelativePath(projectRoot, abs),
-		);
+		const indexPath = writeArchiveIndexSync(stampRoot, (abs) => projectRelativePath(projectRoot, abs));
 
 		// 信号已中止 → 压缩已被宿主取消，不接管摘要（让宿主走它自己的路径），但归档已完成
 		if (ev.signal?.aborted) {
