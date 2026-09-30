@@ -14,11 +14,17 @@ step install https://github.com/uos1231234/step-context-archive
 （`step list` 查看、`step update --extensions` 更新、`step remove` 卸载。）
 
 > **为什么是 `step install` 而不是 `/plugin marketplace`？**
-> 截至 Step Code v0.1.1，内置市场**只做分发、不装载**——
-> `packages/coding-agent/src/step/plugins.ts` 原文：*"Executable plugin entries are recorded but not loaded
-> by the Step marketplace facade."* 装完市场插件后，清单里的 `commands/` 与 `skills/` 不会变成斜杠命令或技能。
+> 市场通道**不装载可执行代码**——`packages/coding-agent/src/step/plugins.ts` 原文：
+> *"Executable plugin entries are recorded but not loaded by the Step marketplace facade."*
+> 代码不在市场通道里跑，`pi.on(...)` 事件钩子就拿不到。
 > 而 `step install` 走的是官方包管理器
 > （`docs/packages.md`），产物经 `resource-loader` 真正加载，事件钩子可用。
+>
+> ⚠️ **2026-09-30 官方 PR #204 合并后有一处变化**：市场清单里的 `commands/` 与 `skills/`
+> 现在会经 `resources_discover` 通道被装载（`/reload` 即生效，不必重启）。
+> **但结论不变**——装进去的仍然只是静态文本，不含代码。本插件因此**主动不声明 `skills`**
+> （理由见「市场副本的用户引导」一节），以免教模型去调市场路径下并不存在的
+> `recall_by_stamp`，并与 package 通道那份同名 skill 撞出 `name "context-archive" collision` 诊断。
 > 详见下方「安装（四条路径）」；从市场安装时的用户引导见「市场副本的用户引导」。
 
 <details>
@@ -114,35 +120,48 @@ step install https://github.com/uos1231234/step-context-archive
 
 - **两条通道是并存的，能力不同**。`step install` 走官方包管理器
   （`DefaultPackageManager`），装完的扩展由 `resource-loader` **真正加载**，
-  事件钩子可用；`/plugin marketplace add` 走市场门面，**只分发不装载**
+  事件钩子可用；`/plugin marketplace add` 走市场门面，**不装载可执行代码**
   （`plugins.ts` 原文：*"Executable plugin entries are recorded but not loaded
   by the Step marketplace facade."*）。**要自动触发请走 `step install`。**
+- **`#204`（2026-09-30 合并）之后的变化**：市场条目的 `commands/` 与 `skills/`
+  会经 `resources_discover` 通道被装载，`/reload` 即生效。这是**静态资源**，
+  不含代码——`entry` 依然是「仅记录，不加载」（官方中文文档站字段说明）。
 - `/plugin marketplace add`、`/plugin install`、`/reload` 是 **TUI 交互命令，
   `step -p` 无头模式下不会执行**（实测：本地市场目录未创建、`~/.stepcode/plugins`
   无新插件）——最终安装须在交互界面完成；无头验证只用路径 4。
-- 市场那份**只交付文件**，不装进扩展通道：`step.plugin.json` 不含 `entry`，
+- 市场那份**不装进扩展通道**：`step.plugin.json` 不含 `entry`，
   宿主不会经 marketplace 装载本扩展的 TS 入口（面向 `mcpServers`/`provision` 声明）。
 - 双 marketplace 声明（`.step-plugin` 与 `.claude-plugin` 同内容）的 `source` 为
   `"."`（仓库根即插件源，**不是**缺省规则 `plugins/<name>`）。
 
 ## 市场副本的用户引导（`step.plugin.json` 的 `description`）
 
-市场安装只交付文件，**没有任何东西会在运行时告诉用户"你装的是壳"**。
+市场安装不装载代码，**没有任何东西会在运行时告诉用户"你装的是壳"**。
 本仓库因此把启用指引直接写进插件清单的 `description`——宿主在
 `step/plugins.ts:1445-1446` 会把 `description` 交给 `/plugin browse`、`/plugin list`
-与安装诊断渲染，**这是 v0.1.1 上唯一确定能触达用户的通道**（不依赖 cwd、不依赖 MCP）：
+与安装诊断渲染，**这是唯一确定能触达用户的通道**（不依赖 cwd、不依赖 MCP）。
+两份 `marketplace.json` 的条目描述同样带这句指引（列表页渲染的是这一份）：
 
 > 瀑布式上下文压缩（extension）：100K 自动介入、压缩前归档原文、20K 工具投影。
-> 注意：市场安装只交付文件，不装载 commands/skills；
+> 注意：本条目只作索引，不含可执行代码——宿主不加载市场条目的代码，
+> 压缩前接管与 recall_by_stamp 工具在此不可用；
 > 启用完整功能请运行 `step install https://github.com/uos1231234/step-context-archive`
 
-**曾尝试过内联 `mcpServers` 提示服务，已移除。** 原因（源码定论）：
-`step/mcp.ts:238-241` 构造 `DiscoveredServer` 时**不注入插件目录作为 `cwd`**，
-`:297-303` 的 `StdioClientTransport` 里 `cwd` **只来自声明自身**且 `normalizeDeclaration`
+**为什么不声明 `skills`（v0.7.0 起）**：`#204` 让市场条目的 `skills` 真的会被装载，
+但**我们的扩展代码只走 package 通道**（`package.json` 的 `pi.extensions`）。市场路径下
+`recall_by_stamp` 工具与 `/recall-stamp` 命令**根本不存在**，装载 `SKILL.md` 等于教模型
+去调不存在的工具；而宿主按 `skill.name` **先到先得**（`core/skills.ts`），
+两份同名 skill 还会撞出 `name "context-archive" collision` 诊断。
+package 通道那份 skill 照常由 `pi.skills` 提供，功能不受影响。
+
+**曾尝试过内联 `mcpServers` 提示服务，已移除。** 原因（源码定论，已于 `#204` 由上游修复）：
+`step/mcp.ts` 构造 `DiscoveredServer` 时**不注入插件目录作为 `cwd`**，
+`StdioClientTransport` 里 `cwd` **只来自声明自身**且 `normalizeDeclaration`
 **不做变量展开**。于是清单里 `args: ["server/index.mjs"]` 这类相对路径会相对
 **用户项目的 cwd** 解析，而非插件目录 → 插件自带的 MCP server 永远起不来。
 清单的 `cwd` 字段也救不了：只能写绝对路径，不可分发。
-（该缺陷对任何用相对 `args` 的插件 MCP server 一视同仁。）
+**上游 `0903f1f`/`be4d5f4` 已修**（`anchorPluginServerCwd` 锚定到插件根，
+`isPathContained` 统一并加固），本仓库 v0.4.0 起已不再依赖该路径。
 
 ## 使用
 

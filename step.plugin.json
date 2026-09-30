@@ -1,9 +1,6 @@
 {
   "id": "context-archive",
   "name": "Context Archive",
-  "description": "瀑布式上下文压缩（extension）：100K 自动介入、压缩前归档原文、20K 工具投影。注意：市场安装只交付文件，不装载 commands/skills；启用完整功能请运行 step install https://github.com/uos1231234/step-context-archive",
-  "version": "0.6.0",
-  "skills": [
-    "skills/context-archive"
-  ]
+  "description": "瀑布式上下文压缩（extension）：100K 自动介入、压缩前归档原文、20K 工具投影。注意：本条目只作索引，不含可执行代码——宿主不加载市场条目的代码，压缩前接管与 recall_by_stamp 工具在此不可用；启用完整功能请运行 step install https://github.com/uos1231234/step-context-archive",
+  "version": "0.7.0"
 }

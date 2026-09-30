@@ -29,7 +29,28 @@ describe("仓库元数据（防回归）", () => {
 		const manifest = JSON.parse(read("../step.plugin.json"));
 		// plugins.ts:1445-1446 把 description 交给 /plugin browse、/plugin list 与安装诊断
 		expect(manifest.description).toContain("step install https://github.com/uos1231234/step-context-archive");
-		expect(manifest.description).toContain("市场安装只交付文件");
+		expect(manifest.description).toContain("不含可执行代码");
+	});
+
+	it("插件清单不声明 skills（市场路径不运行扩展，装了只会误导并撞名）", () => {
+		const manifest = JSON.parse(read("../step.plugin.json"));
+		// Step-Code #204（2026-09-30 合并）让市场条目的 skills 经 resources_discover 真的被装载。
+		// 我们的扩展代码只走 package 通道（package.json 的 pi.extensions）；市场条目不装载代码，
+		// 所以市场路径下 recall_by_stamp 工具与 /recall-stamp 命令并不存在——装载 SKILL.md
+		// 等于教模型去调不存在的工具；而且宿主按 skill.name 先到先得（core/skills.ts），
+		// 与 package 通道那份同名 skill 撞出 `name "context-archive" collision` 诊断。
+		expect(manifest.skills).toBeUndefined();
+	});
+
+	it("两份 marketplace 条目的 description 同样带引导（列表页渲染的是这一份）", () => {
+		const step = JSON.parse(read("../.step-plugin/marketplace.json"));
+		const claude = JSON.parse(read("../.claude-plugin/marketplace.json"));
+		for (const manifest of [step, claude]) {
+			expect(manifest.plugins[0].description).toContain(
+				"step install https://github.com/uos1231234/step-context-archive",
+			);
+			expect(manifest.plugins[0].description).toContain("不含可执行代码");
+		}
 	});
 
 	it("许可为 AGPL-3.0-only 且与所属插件市场集合一致（防口径漂移）", () => {

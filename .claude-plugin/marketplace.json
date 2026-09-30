@@ -4,7 +4,7 @@
 	"plugins": [
 		{
 			"name": "context-archive",
-			"description": "瀑布式上下文压缩：算法去重→三点摘要，stamp 归档与召回，有界工具投影",
+			"description": "瀑布式上下文压缩：算法去重→三点摘要，stamp 归档与召回，有界工具投影。注意：本条目只作索引，不含可执行代码；启用完整功能请运行 step install https://github.com/uos1231234/step-context-archive",
 			"source": "."
 		}
 	]
