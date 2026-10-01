@@ -9,7 +9,7 @@ step install https://github.com/uos1231234/step-context-archive
 ```
 
 装完即生效：`turn_end` / `session_before_compact` / `tool_result` 三个事件钩子照常工作，
-长会话到 100K 自动介入、压缩前接管归档、20K 工具结果有界投影全部启用。
+长会话到 100K 自动介入、压缩前接管归档、10K 工具结果有界投影全部启用。
 装完写进 `~/.stepcode/config.toml` 的 `packages`，**以后每次启动自动校验并更新**。
 （`step list` 查看、`step update --extensions` 更新、`step remove` 卸载。）
 
@@ -49,19 +49,33 @@ step install https://github.com/uos1231234/step-context-archive
 三个钩子（算法全部在 `src/pipeline.ts`，`src/index.ts` 只接线）：
 
 1. **turn_end**：读 `ctx.getContextUsage()`，`decideFold` 判定后向 stderr 打一行
-   诊断；判 `summarize` 时带自定义指令发起 `ctx.compact`（模块级 inFlight 防重入）。
-   此钩子只观察，不直接改会话。
+   诊断。**只观察，不发起压缩**——宿主 `AgentSession.compact()` 的第一行就是
+   `await this.abort()`，而 `turn_end` 发射于 agent loop 的内层循环（run 仍在进行中），
+   调用它会当场中止用户正在跑的这一轮。压缩由 `session_before_compact` 完整接管。
 2. **session_before_compact**（核心接管）：`semanticChunks` 切块 → 每块**原文**写入
    项目内 `.stepcode/context-archive/stamp-<id>.md` → `dedupChunk` 去重 → 去重后仍 >800 token 的块
    并行走三点摘要（单块失败降级为首行，整体不 throw）→ 返回 `{compaction:{summary}}`，
    summary = 协议头 + 每块一行 `#STAMP <id> → <项目相对路径> — <摘要>`。
-   归档**不覆盖同名文件**：内容相同幂等跳过，内容不同则拒绝写入且该块不发索引行
+   归档**不覆盖同名文件**：内容相同幂等跳过；内容是本次正文的严格前缀（上次写盘
+   被中断的残骸）则覆盖自愈；内容不同则拒绝写入，该块改发一行无指针的
+   `#UNARCHIVED（原文未落盘，无法召回）— <摘要>`，避免它的内容凭空消失。
+   **一个块都没归档成功时交回 `undefined`**，让宿主走它自己的 LLM 摘要——宿主一旦
+   收到 `compaction` 就完全跳过自己的摘要，此时只交回协议头会让整段历史只剩那百余字。
    （宁可只剩摘要，也不给出指向错内容的指针）。
    每次归档后重写 `.stepcode/context-archive/INDEX.md` 磁盘索引；**即使压缩被宿主中止
    （`signal.aborted`），原文与索引仍会落盘，只是不接管摘要**——保证「压缩前归档原文」
    这个承诺在任何路径下都不破。
-3. **tool_result**：超 20K token 的工具结果先归档全文再投影截断（归档失败则不投影，
-   原文保留在会话里）。
+3. **tool_result**：超 10K token 的工具结果先归档全文再投影截断（归档失败则不投影，
+   原文保留在会话里）。归档写的始终是钩子所见全文，投影只影响留在上下文里的部分。
+
+   > 投影线为什么必须**低于**宿主的 50KB：宿主在内置工具 `execute()` 内部就把输出截到
+   > 50KB（`core/tools/truncate.ts` 的 `DEFAULT_MAX_BYTES`），`tool_result` 钩子拿到的
+   > 是**截断后**的内容。投影线若折算超过它，对所有内置工具都不会触发，等于形同虚设。
+   > 上游 `tool_result` 之后拿不到更早的内容——被宿主截掉的部分插件无法补救。
+
+> token 估算按字符集分别折算：CJK 1 字 1 token，其余每 4 字符 1 token
+> （`estimateTokens`）。宿主压缩用的是 `len/4`，那条启发式按 ASCII 标定，对中文会
+> 低估约 4 倍；本插件的投影线与摘要门限都是**丢弃数据**的硬决策，偏差集中在这里。
 
 ## 验证记录（真实项目，非玩具仓库）
 
@@ -88,6 +102,27 @@ step install https://github.com/uos1231234/step-context-archive
 3. 因此把**不依赖 `ctx` 的同步归档整体前置**到任何 ctx / 模型调用之前；模型摘要阶段单独 `try/catch`，
    失败只影响摘要、不会影响已落盘的归档。`INDEX.md` 磁盘索引即为此设——压缩被中止、`#STAMP` 没进会话时，
    原文与可召回清单都还在盘上。
+
+### v0.8.0：自博弈审计修掉的五个真问题
+
+起因是一次「攻（多个独立审计者）+ 防（专门证伪）」的全量自审。**判据是能复现且对真实运行有影响**
+——不可复现的、或影响为空的，一律不改；每条都有对应的防回归测试。
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `turn_end` 触发压缩时，**用户正在跑的那一轮被当场中止** | 宿主 `AgentSession.compact()` 第一行就是 `await this.abort()`，而 `turn_end` 发射于 agent loop 内层循环、run 仍在进行中 | `turn_end` 只保留诊断行，不再调 `ctx.compact()`。压缩本来就已在 `session_before_compact` 完整接管 |
+| 2 | 归档**全部**写盘失败时，整段会话历史只剩 135 字协议头 | 宿主拿到 `compaction` 就完全跳过它自己的 LLM 摘要（`agent-session.ts` 的 `if (extensionCompaction) … else 跑默认摘要`） | 全失败时交回 `undefined` 让宿主走自己的摘要，并 `ctx.ui.notify`——之前是静默的 |
+| 3 | 写盘失败的块在摘要里**什么都不留**，内容凭空消失 | 失败分支直接 `return null` | 改发无指针的 `#UNARCHIVED（原文未落盘，无法召回）— <摘要>`：保留内容，但不给指针（磁盘上那份是别的内容，给指针更糟） |
+| 4 | 压缩被中断留下的**半截归档文件永久毒化**该 stamp | `flag:"wx"` 只保证不覆盖已存在文件，创建成功≠写完；后续每次都撞 EEXIST + 内容不同 | 磁盘内容是本次正文的**严格前缀**时判定为残骸并覆盖重写；无前缀关系仍拒绝覆盖 |
+| 5 | `projectionMax` 对**所有内置工具**形同虚设 | 宿主在内置工具 `execute()` 内部就截到 50KB，钩子拿到的是截断后内容；20000 token（≈80000 字符）远高于该线，永远触发不了 | 降到 10000 token，稳稳落在 50KB 之下 |
+
+连带修掉两处派生问题：`estimateTokens` 改按字符集折算（CJK 1 字 1 token，其余 4:1），
+投影预算换算同步改（原来固定乘 4，纯中文正文会把预算撑爆）；`CONFIG.foldPercent` 这份
+**死配置**删除（它镜像 `THRESHOLDS.foldPercent`，改它对行为零影响却会被面板当生效值打印），
+折叠门限回到单一事实源。
+
+> 关于第 5 条的边界：归档写的始终是钩子所见全文（`projectToolResult` 的 `fullText`），
+> 不因投影线截断。宿主截掉的那部分**插件拿不到**——`tool_result` 钩子拿不到比它更早的内容。
 
 ## 安装（四条路径，第 1 条推荐、第 4 条为无头实测）
 
@@ -142,7 +177,7 @@ step install https://github.com/uos1231234/step-context-archive
 与安装诊断渲染，**这是唯一确定能触达用户的通道**（不依赖 cwd、不依赖 MCP）。
 两份 `marketplace.json` 的条目描述同样带这句指引（列表页渲染的是这一份）：
 
-> 瀑布式上下文压缩（extension）：100K 自动介入、压缩前归档原文、20K 工具投影。
+> 瀑布式上下文压缩（extension）：100K 自动介入、压缩前归档原文、10K 工具投影。
 > 注意：本条目只作索引，不含可执行代码——宿主不加载市场条目的代码，
 > 压缩前接管与 recall_by_stamp 工具在此不可用；
 > 启用完整功能请运行 `step install https://github.com/uos1231234/step-context-archive`
@@ -184,8 +219,8 @@ package 通道那份 skill 照常由 `pi.skills` 提供，功能不受影响。
 | `enterTokens` | `null` | **绝对介入线覆盖**；`null` = 按当前模型的上下文窗口自适应（默认行为） |
 | `enterPercent` | `0.25` | 自适应比例：窗口的百分之多少开始介入 |
 | `enterFloor` | `100_000` | 自适应的绝对下限，防止小窗口下过早介入 |
-| `foldPercent` | 80 | 实际占用达到窗口的这个百分比才发起压缩摘要（镜像 `THRESHOLDS`） |
-| `projectionMax` | 20_000 | 工具投影上限，改 `CONFIG.projectionMax` 这一行 |
+| `foldPercent` | 80 | 折叠门限：实际占用达到窗口的这个百分比才调模型做摘要。**唯一事实源是 `pipeline.ts` 的 `THRESHOLDS.foldPercent`**，不在 `CONFIG` 里——镜像过的那份是死配置，改它对行为零影响却会被面板当生效值打印 |
+| `projectionMax` | 10_000 | 工具投影上限（token），改 `CONFIG.projectionMax` 这一行。必须低于宿主的 50KB 内置截断线，否则对内置工具形同虚设 |
 | `summarizeMinTokens` | 800 | 触发模型摘要的最小块，改 `CONFIG.summarizeMinTokens` 这一行 |
 
 **介入线按模型窗口自适应**（`pipeline.ts` 的 `effectiveEnterTokens`）：
@@ -242,9 +277,9 @@ package 通道那份 skill 照常由 `pi.skills` 提供，功能不受影响。
 | --- | --- | --- |
 | 形态 | TypeScript 扩展（`src/index.ts` + `src/pipeline.ts`，776 行） | `step.plugin.json` + `commands/*.md` + `skills/*/SKILL.md` |
 | 装载通道 | `~/.stepcode/agent/extensions/`、settings.json、`step -e`（**这条路现在可用**） | `/plugin marketplace add` + `/plugin install`（**装得上但宿主暂不装载**） |
-| 自动触发 | 有：100K 介入线 + 压缩前接管 + 20K 有界投影 | 无：靠模型自觉执行 |
+| 自动触发 | 有：100K 介入线 + 压缩前接管 + 10K 有界投影 | 无：靠模型自觉执行 |
 | 协议 | `#STAMP` 索引行 = **项目相对路径** + 三点摘要「目标 / 关键决策 / 是否完成」+ 承认 `b` 前缀退化 id + 同名文件不覆盖 | 同左（以市场协议为准，本仓库已对齐） |
-| 状态 | v0.6.0，AGPL-3.0-only | v1.0.0，in-progress（[PR #1](https://github.com/Neriah-Ado/stepcode-plugins/pull/1) 已合并；`SCA-100-4` 真实项目验证已完成，已汇报待维护者回写） |
+| 状态 | v0.8.0，AGPL-3.0-only | v1.0.0，in-progress（[PR #1](https://github.com/Neriah-Ado/stepcode-plugins/pull/1) 已合并；`SCA-100-4` 真实项目验证已完成，已汇报待维护者回写） |
 
 选哪份：**想要自动压缩用本仓库**（走安装三条路径）；想要“一键装进 Step Code 会话”用市场副本，
 但需等宿主开放插件装载通道。两者共享同一套 `#STAMP` 索引格式与三点摘要协议，

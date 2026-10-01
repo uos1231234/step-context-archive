@@ -14,6 +14,7 @@ import {
 	effectiveEnterTokens,
 	estimateTokens,
 	formatStampLine,
+	formatUnarchivedLine,
 	legacyArchiveDir,
 	normalizeStampId,
 	parseSummary,
@@ -178,10 +179,17 @@ export const CONFIG = {
 	enterTokens: null as number | null,
 	enterPercent: 0.25,
 	enterFloor: 100_000,
-	/** 折叠门限：实际占用达到窗口的这个百分比才发起压缩摘要（镜像 THRESHOLDS） */
-	foldPercent: THRESHOLDS.foldPercent,
-	/** 工具结果投影上限（token），作为 projectToolResult 的 maxTokens */
-	projectionMax: 20_000,
+	/**
+	 * 工具结果投影上限（token），作为 projectToolResult 的 maxTokens。
+	 *
+	 * 为什么是 10000 而不是更大的数：宿主在工具 execute() 内部就把内置工具输出
+	 * 截到 50KB（core/tools/truncate.ts 的 DEFAULT_MAX_BYTES），而 tool_result 钩子
+	 * 拿到的是**截断后**的内容。若本值折算的字符数超过宿主上限，投影对所有内置
+	 * 工具都不会触发，等于形同虚设。10000 token ≈ 40000 英文字符 / 10000 汉字，
+	 * 稳稳落在 50KB 之下，让「归档全文 + 上下文只留投影」这个设计真正生效。
+	 * 归档写的始终是钩子所见全文（projectToolResult 的 fullText），不因本值截断。
+	 */
+	projectionMax: 10_000,
 	/** 去重后仍超过该 token 数的块才值得花一次模型调用做三点摘要 */
 	summarizeMinTokens: 800,
 	/** 摘要压缩默认模型：优先 step-3.7-flash（便宜），不可用时回退会话模型 */
@@ -201,28 +209,13 @@ const ENTER_POLICY: EnterPolicy = {
 	},
 };
 
-/** ctx.compact 下发的自定义指令：告知宿主采用本插件的三点摘要协议与已归档约定 */
-const COMPACT_INSTRUCTIONS = [
-	"本次压缩遵循 context-archive 插件的三点摘要协议：每个历史任务块只保留目标、关键决策、是否完成三点。",
-	"摘要中必须原样保留 #STAMP 标记行，它们指向已归档的完整原文。",
-	"保留仍未完成的任务、未决问题与关键文件路径，删除可从归档召回的细节。",
-	"后续需要历史细节时，用 recall_by_stamp 工具按 stamp 读取原文，不要凭记忆复述。",
-].join("\n");
+/** 上次接管压缩的时间，仅供 /context-archive 诊断展示 */
+let lastTakeoverAt = 0;
 
 /** 压缩结果顶部协议段：向接手的模型说明 #STAMP 行与召回纪律 */
 const PROTOCOL_HEADER =
 	"[context-archive] 以下 #STAMP 行是已归档历史任务块的索引，摘要仅作导航，细节可能失真。\n" +
 	"召回纪律：需要引用历史细节时，先用 recall_by_stamp 工具（或 /recall-stamp 命令）按 stamp 读取原文，禁止凭记忆复述。\n";
-
-// ---------------------------------------------------------------------------
-// 模块级状态
-// ---------------------------------------------------------------------------
-
-/** 防重入：compact 发起后未回调前不再次发起 */
-let inFlight = false;
-let inFlightSince = 0;
-/** 上次接管压缩的时间，仅供 /context-archive 诊断展示 */
-let lastTakeoverAt = 0;
 
 // ---------------------------------------------------------------------------
 // 辅助函数
@@ -343,37 +336,23 @@ export default function activate(pi: ExtensionAPI): void {
 	const legacyRoot = legacyArchiveDir(resolveAgentDir());
 	const readRoots = [stampRoot, legacyRoot];
 
-	// turn_end：只观察与打印一行诊断，不直接改会话。本插件的两个真实改写点是
-	//「压缩接管」（session_before_compact）与「工具投影」（tool_result），
-	// turn_end 若也改写会造成重复触发；这里仅在决策为 summarize 时发起 compact。
+	// turn_end：只观察与打印一行诊断，**不发起压缩**。
+	//
+	// 为什么不在这里 compact：宿主 AgentSession.compact() 的第一行就是
+	// `await this.abort()`，而 turn_end 是在 agent loop 的内层循环里发射的
+	// （agent-loop.ts，run 仍在进行中），调用它会当场中止用户正在跑的这一轮，
+	// 官方注释也明写「Manual compaction never retries or continues the
+	// interrupted agent turn」。压缩由 session_before_compact 钩子完整接管，
+	// 主动压缩是宿主自己的阈值职责，这里越权只会掐断任务。
 	pi.on("turn_end", (_ev, ctx) => {
 		const usage = ctx.getContextUsage();
 		if (!usage) return;
 		const decision = decideFold(usage, ENTER_POLICY);
-		if (decision === "silent") return;
 		process.stderr.write(
 			`[context-archive] usage=${usage.tokens} window=${usage.contextWindow ?? "?"} ` +
 				`enter=${effectiveEnterTokens(ENTER_POLICY, usage.contextWindow)} ` +
 				`percent=${usage.percent} decision=${decision}\n`,
 		);
-		if (decision !== "summarize") return;
-		// 防重入：compact 未回调前不再发起；异常卡死超过 10 分钟自动放行
-		if (inFlight && Date.now() - inFlightSince < 600_000) return;
-		inFlight = true;
-		inFlightSince = Date.now();
-		const release = () => {
-			inFlight = false;
-		};
-		try {
-			ctx.compact({
-				customInstructions: COMPACT_INSTRUCTIONS,
-				onComplete: release,
-				onError: release,
-			});
-		} catch (error) {
-			release();
-			process.stderr.write(`[context-archive] compact 发起失败：${String(error)}\n`);
-		}
 	});
 
 	// 核心接管：归档原文 + 生成带 #STAMP 行的压缩摘要。
@@ -421,6 +400,17 @@ export default function activate(pi: ExtensionAPI): void {
 		}
 
 		// ── 阶段 2：接管摘要（依赖 ctx 与模型；失败也不影响已落盘的归档）────────
+		// 一个块都没归档成功时**必须放弃接管**：宿主拿到 compaction 就完全跳过它
+		// 自己的 LLM 摘要（agent-session.ts 的 `if (extensionCompaction) {...} else
+		// { 跑默认摘要 }`），此时若只交回 PROTOCOL_HEADER，firstKeptEntryId 之前的
+		// 全部历史就只剩那 135 字。交回 undefined 让宿主用自己的摘要，历史不丢。
+		if (chunks.length > 0 && archived === 0) {
+			const reason = `context-archive：${chunks.length} 个块全部归档失败，本轮不接管摘要（宿主将走默认压缩）`;
+			process.stderr.write(`[context-archive] ${reason}\n`);
+			ctx.ui?.notify(reason, "error");
+			return;
+		}
+
 		try {
 			lastTakeoverAt = Date.now();
 			const useModel =
@@ -429,8 +419,11 @@ export default function activate(pi: ExtensionAPI): void {
 				await Promise.all(
 					chunks.map(async (chunk) => {
 						const stamp = stampOf(chunk.key);
-						if (failed.has(stamp)) return null;
 						const brief = await briefOf(dedupChunk(chunk.text), ctx, useModel, ev.signal);
+						// 归档失败的块也要留一行摘要，否则它的内容在压缩后彻底消失。
+						// 但不能发 #STAMP：磁盘上那个文件是「内容不同的旧内容」，
+						// 指针过去会读到别人的内容，比不给指针更糟。
+						if (failed.has(stamp)) return formatUnarchivedLine(brief);
 						return formatStampLine(
 							stamp,
 							projectRelativePath(projectRoot, stampFilePath(stampRoot, stamp)),
@@ -548,7 +541,7 @@ export default function activate(pi: ExtensionAPI): void {
 					`[context-archive] 生效介入线：${effectiveEnterTokens(ENTER_POLICY, usage?.contextWindow)}` +
 						`（策略 ${CONFIG.enterTokens === null ? `自适应 max(下限 ${CONFIG.enterFloor}, 窗口×${CONFIG.enterPercent})` : `固定 ${CONFIG.enterTokens}`}，` +
 						`本会话窗口 ${usage?.contextWindow ?? "未知"}）`,
-					`[context-archive] CONFIG：enterTokens=${CONFIG.enterTokens} enterPercent=${CONFIG.enterPercent} enterFloor=${CONFIG.enterFloor} foldPercent=${CONFIG.foldPercent} projectionMax=${CONFIG.projectionMax} summarizeMinTokens=${CONFIG.summarizeMinTokens}`,
+					`[context-archive] CONFIG：enterTokens=${CONFIG.enterTokens} enterPercent=${CONFIG.enterPercent} enterFloor=${CONFIG.enterFloor} foldPercent=${THRESHOLDS.foldPercent} projectionMax=${CONFIG.projectionMax} summarizeMinTokens=${CONFIG.summarizeMinTokens}`,
 					"",
 				].join("\n"),
 			);

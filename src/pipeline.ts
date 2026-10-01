@@ -276,6 +276,19 @@ export function legacyArchiveDir(agentDir: string): string {
   return join(agentDir, "context-archive");
 }
 
+/**
+ * 判定磁盘上已存在的同名文件是否为「上次写盘被中断」的残骸。
+ *
+ * 为什么需要：`flag:"wx"` 保证不覆盖已存在文件，但**创建成功不等于写完**——进程
+ * 在 writeFile 中途被杀、或 ENOSPC，都会留下一个内容是本次正文**严格前缀**的半截
+ * 文件。没有这条自愈路径，该 stamp 之后每次归档都撞 EEXIST + 内容不同而失败，
+ * 永久失去归档能力（本插件明确担心压缩过程中被宿主杀进程，所以这个状态是现实的）。
+ * 内容与本次正文无前缀关系时返回 false，按「内容不同」处理、仍然拒绝覆盖。
+ */
+function isInterruptedWrite(existing: string, body: string): boolean {
+  return existing.length > 0 && existing.length < body.length && body.startsWith(existing);
+}
+
 // 写入 <dir>/stamp-<stamp>.md，返回绝对路径。已存在同名文件不覆盖（见函数体注释）
 export async function writeStamp(dir: string, stamp: string, body: string): Promise<string> {
   const file = resolve(dir, `stamp-${stamp}.md`);
@@ -284,7 +297,12 @@ export async function writeStamp(dir: string, stamp: string, body: string): Prom
     await writeFile(file, body, { encoding: "utf8", flag: "wx" });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    if ((await readFile(file, "utf8")) === body) return file;
+    const existing = await readFile(file, "utf8");
+    if (existing === body) return file;
+    if (isInterruptedWrite(existing, body)) {
+      await writeFile(file, body, { encoding: "utf8" });
+      return file;
+    }
     throw new Error(`归档文件已存在且内容不同，拒绝覆盖：${file}`);
   }
   return file;
@@ -335,7 +353,12 @@ export function writeStampSync(dir: string, stamp: string, body: string): string
     writeFileSync(file, body, { encoding: "utf8", flag: "wx" });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    if (readFileSync(file, "utf8") === body) return file;
+    const existing = readFileSync(file, "utf8");
+    if (existing === body) return file;
+    if (isInterruptedWrite(existing, body)) {
+      writeFileSync(file, body, { encoding: "utf8" });
+      return file;
+    }
     throw new Error(`归档文件已存在且内容不同，拒绝覆盖：${file}`);
   }
   return file;
@@ -470,12 +493,33 @@ function isLowSurrogate(code: number): boolean {
   return code >= 0xdc00 && code <= 0xdfff;
 }
 
-// 估算 token 数：每 4 字符折算 1 token，向上取整
+// CJK 字符（假名 + 表意文字 + 谚文）：UTF-8 占 2~3 字节，经验值约 1 字 1 token
+const CJK_RE = /[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]/g;
+
+/**
+ * 估算 token 数：CJK 按 1 字 1 token、其余按每 4 字符 1 token 分别折算后求和。
+ *
+ * 为什么不对齐宿主的 len/4：那条启发式按 ASCII 标定，对中文会低估约 4 倍
+ * （8000 个中文字符真实约 8000 token，len/4 只算出 2000）。低估会让「超过上限
+ * 就投影 / 就调模型做摘要」的判断集体失准，而这两处都是**丢弃数据**的硬决策，
+ * 偏差后果集中在这里，故按字符集分别折算。
+ */
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  const cjk = text.match(CJK_RE)?.length ?? 0;
+  return cjk + Math.ceil((text.length - cjk) / 4);
 }
 
-// 工具结果有界投影：总文本超 maxTokens（默认 20000）时保头 70%、保尾 30%，
+/**
+ * 给定文本，按它自身的 CJK 密度换算：能装下 targetTokens 个 token 需要多少字符。
+ * 中文与 ASCII 的 token/字符密度差约 4 倍，固定乘 4 会在纯中文正文上把预算撑爆。
+ */
+function charsForTokens(text: string, targetTokens: number): number {
+  if (text.length === 0) return 0;
+  const density = estimateTokens(text) / text.length;
+  return density > 0 ? Math.floor(targetTokens / density) : 0;
+}
+
+// 工具结果有界投影：总文本超 maxTokens（默认 10000）时保头 70%、保尾 30%，
 // 预算按 token 估算换算成字符，尾部切点做代理对保护以落在字符边界，
 // 中间替换为一行投影标记；image 等非 text 片段原位保留。
 // fullText 返回原文全文，由调用方（index 层）负责写入归档。
@@ -485,13 +529,13 @@ export function projectToolResult(
   maxTokens?: number,
   stamp?: string
 ): { content: Array<{ type: string; text?: string }>; projected: boolean; fullText: string } {
-  const limit = maxTokens ?? 20_000;
+  const limit = maxTokens ?? 10_000;
   const textParts = content.filter((part) => part.type === "text" && typeof part.text === "string");
   const fullText = textParts.map((part) => part.text as string).join("\n");
   if (fullText.includes(PROJECTION_PREFIX)) return { content, projected: false, fullText };
   if (estimateTokens(fullText) <= limit) return { content, projected: false, fullText };
-  const headChars = Math.floor(limit * 0.7) * 4;
-  const tailChars = Math.floor(limit * 0.3) * 4;
+  const headChars = charsForTokens(fullText, limit * 0.7);
+  const tailChars = charsForTokens(fullText, limit * 0.3);
   let headEnd = Math.min(headChars, fullText.length);
   if (headEnd < fullText.length && isLowSurrogate(fullText.charCodeAt(headEnd))) headEnd--;
   let tailStart = Math.max(fullText.length - tailChars, 0);
@@ -517,4 +561,11 @@ export function projectToolResult(
 // stamp 行：单行可读的「stamp → 归档路径 — 摘要」引用格式
 export function formatStampLine(stamp: string, path: string, summary: string): string {
   return `#STAMP ${stamp} → ${path} — ${summary}`;
+}
+
+// 归档失败块的摘要行：**没有指针**，只留摘要本身。
+// 为什么不给 #STAMP：写盘失败意味着磁盘上同名文件存在且内容不同（见 writeStampSync），
+// 给出指针会让后来按 stamp 召回的人读到别人的内容——那比明确说"这块没存下来"更糟。
+export function formatUnarchivedLine(summary: string): string {
+  return `#UNARCHIVED（原文未落盘，无法召回）— ${summary}`;
 }

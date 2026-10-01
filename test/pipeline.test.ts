@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -388,5 +388,63 @@ describe("estimateTokens", () => {
     expect(estimateTokens("abcd")).toBe(1);
     expect(estimateTokens("abcde")).toBe(2);
     expect(estimateTokens(mixedText(200))).toBe(923);
+  });
+
+  it("CJK 按 1 字 1 token 折算，不再沿用 ASCII 标定的 4:1", () => {
+    // 旧算法会把 8000 个中文字符算成 2000，低估约 4 倍
+    expect(estimateTokens("中".repeat(8000))).toBe(8000);
+    expect(estimateTokens("こんにちは")).toBe(5);
+    expect(estimateTokens("안녕하세요")).toBe(5);
+    // 中英混排：CJK 1:1，其余 4:1，两部分相加
+    expect(estimateTokens("中".repeat(1000) + "a".repeat(1000))).toBe(1250);
+  });
+});
+
+describe("projectToolResult 的预算换算随字符集走", () => {
+  const stamp = "abc123def456";
+
+  it("纯中文正文投影后落在上限附近，而不是被 4:1 撑爆", () => {
+    const zh = "中".repeat(50_000);
+    const r = projectToolResult([{ type: "text", text: zh }], 10_000, stamp);
+    expect(r.projected).toBe(true);
+    expect(r.fullText).toBe(zh); // 归档的始终是全文
+    // 标记行本身要占 token，故留少量余量
+    expect(estimateTokens(r.content[0].text ?? "")).toBeLessThanOrEqual(10_100);
+  });
+
+  it("落在宿主内置工具 50KB 截断线两侧的内容都能触发投影（投影线必须低于宿主上限）", () => {
+    // 宿主 core/tools/truncate.ts 的 DEFAULT_MAX_BYTES = 50 * 1024 字节，
+    // tool_result 钩子拿到的是截断后内容；若投影线折算超过它，本功能形同虚设。
+    const HOST_MAX_BYTES = 50 * 1024;
+    const afterHostAscii = "a".repeat(HOST_MAX_BYTES);
+    const afterHostChinese = "中".repeat(Math.floor(HOST_MAX_BYTES / 3));
+    expect(projectToolResult([{ type: "text", text: afterHostAscii }], 10_000, stamp).projected).toBe(true);
+    expect(projectToolResult([{ type: "text", text: afterHostChinese }], 10_000, stamp).projected).toBe(true);
+  });
+});
+
+describe("写盘被中断留下的半截文件可自愈", () => {
+  it("磁盘内容是本次正文的严格前缀时覆盖重写", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sca-heal-"));
+    const body = "Y".repeat(4000);
+    const stamp = stampOf("heal-me");
+
+    // 模拟进程在 writeFile 中途被杀：文件已创建但只落盘一半
+    const file = stampFilePath(dir, stamp);
+    await writeFile(file, body.slice(0, 1500), "utf8");
+
+    await expect(writeStamp(dir, stamp, body)).resolves.toBe(file);
+    expect(await readFile(file, "utf8")).toBe(body);
+    rm(dir, { recursive: true, force: true });
+  });
+
+  it("内容与本次正文无前缀关系时仍然拒绝覆盖（占位文件不是残骸）", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sca-heal-2-"));
+    const body = "Y".repeat(4000);
+    const stamp = stampOf("not-a-prefix");
+    await writeFile(stampFilePath(dir, stamp), "SQUATTER", "utf8");
+
+    await expect(writeStamp(dir, stamp, body)).rejects.toThrow("拒绝覆盖");
+    rm(dir, { recursive: true, force: true });
   });
 });

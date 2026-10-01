@@ -9,11 +9,12 @@
  * 被测的是 activate() 里真实注册的处理器与整条 session_before_compact 路径：
  * 切块 → 原文归档 → 三点摘要 → 组装 #STAMP 索引行。宿主是否允许堆到 205K 属另一问题。
  */
-import { mkdtempSync, readdirSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import activate, { CONFIG } from "../src/index.ts";
+import { estimateTokens, THRESHOLDS } from "../src/pipeline.ts";
 
 type Handler = (ev: any, ctx: any) => Promise<any> | any;
 
@@ -154,12 +155,9 @@ describe("session_before_compact 接管（真实处理器 + 宿主 API 边界 mo
 
 		// 旧内容原样保留
 		expect(readFileSync(join(dir, first), "utf8")).toContain("原始内容");
-		// 该块不发索引行（不给错指针）
-		expect(
-			result.compaction.summary.split("\n").filter((l: string) => l.startsWith("#STAMP ")),
-		).toHaveLength(0);
-		// 协议头仍在
-		expect(result.compaction.summary).toContain("[context-archive]");
+		// 唯一的块写盘失败 → 归档 0 块 → 交回 undefined，让宿主走它自己的摘要。
+		// 若交回 compaction，协议头就会成为 firstKeptEntryId 之前全部历史的唯一表示。
+		expect(result).toBeUndefined();
 	});
 });
 
@@ -180,12 +178,14 @@ describe("turn_end 阈值判定（真实处理器）", () => {
 		expect(compactCalls).toBe(0);
 	});
 
-	it("1M 窗口 85% → summarize 并发起 compact", async () => {
+	it("1M 窗口 85% → 判为 summarize，但依然不发起 compact", async () => {
+		// 判定仍要算（诊断行依赖它），但发起压缩是越权：宿主 compact() 首行即
+		// await this.abort()，而 turn_end 发射于 agent loop 内层循环、run 仍在进行中。
 		const h = mount();
 		let compactCalls = 0;
 		const ctx = { ...ctxWith({ tokens: 850_000, contextWindow: 1_000_000, percent: 85 }), compact: () => { compactCalls++; } };
 		await h.fire("turn_end", { type: "turn_end" }, ctx);
-		expect(compactCalls).toBe(1);
+		expect(compactCalls).toBe(0);
 	});
 });
 
@@ -283,11 +283,98 @@ describe("工具与命令注册", () => {
 	});
 });
 
+describe("归档失败时的降级路径（宿主一旦收到 compaction 就跳过它自己的摘要）", () => {
+	const entries = branch([
+		{ id: "e1", role: "user", text: "任务一：把登录页改完。" },
+		{ id: "e2", role: "assistant", text: "已完成登录页改造，涉及 320 行改动。" },
+		{ id: "e3", role: "user", text: "任务二：修一个崩溃。" },
+		{ id: "e4", role: "assistant", text: "崩溃根因是 null 解引用，修复于 parser.ts 第 88 行。" },
+	]);
+	const ev = () => ({
+		reason: "manual",
+		preparation: { firstKeptEntryId: "e4", tokensBefore: 180_000, contextWindow: 200_000 },
+		branchEntries: entries,
+		willRetry: false,
+		signal: new AbortController().signal,
+	});
+
+	it("全部块写盘失败时交回 undefined，让宿主走它自己的 LLM 摘要", async () => {
+		// 让项目根下的 .stepcode 变成普通文件 → 建归档目录时 ENOTDIR → 全块失败
+		writeFileSync(join(project, ".stepcode"), "not a directory", "utf8");
+		const h = mount();
+		const notified: string[] = [];
+		const ctx = { ...ctxWith({ tokens: 180_000, contextWindow: 200_000, percent: 90 }), ui: { notify: (m: string) => notified.push(m) } };
+
+		const result = await h.fire("session_before_compact", ev(), ctx);
+
+		// 关键回归：绝不能返回 compaction，否则 firstKeptEntryId 之前的历史只剩协议头
+		expect(result).toBeUndefined();
+		// 也不能静默：用户必须看到发生了什么
+		expect(notified.join(" ")).toContain("全部归档失败");
+	});
+
+	it("部分块写盘失败时，该块仍留下摘要行，只是不带指针", async () => {
+		const h = mount();
+		const ctx = ctxWith({ tokens: 180_000, contextWindow: 200_000, percent: 90 });
+
+		// 先正常跑一次，把归档目录建起来
+		await h.fire("session_before_compact", ev(), ctx);
+
+		// 把其中一个块的归档文件占位成与正文**无前缀关系**的内容 → 触发 EEXIST 冲突
+		const dir = join(project, ".stepcode", "context-archive");
+		const victim = readdirSync(dir).find((n) => n.startsWith("stamp-"))!;
+		writeFileSync(join(dir, victim), "SQUATTER", "utf8");
+
+		const result = await h.fire("session_before_compact", ev(), ctx);
+		const summary: string = result?.compaction?.summary ?? "";
+
+		// 失败块不指向磁盘（那个文件是别人的内容），但它的内容不能凭空消失
+		expect(summary).toContain("#UNARCHIVED");
+		expect(summary).not.toContain(victim.slice("stamp-".length, -".md".length));
+		// 其余块照常带 #STAMP
+		expect(summary).toContain("#STAMP ");
+	});
+});
+
+describe("turn_end 只观察，不发起压缩", () => {
+	it("即使判定为 summarize 也不调 ctx.compact", async () => {
+		// 宿主 AgentSession.compact() 的第一行就是 await this.abort()，而 turn_end
+		// 发射于 agent loop 内层循环（run 仍在进行中）——调用它会当场中止用户这一轮。
+		const h = mount();
+		let compactCalls = 0;
+		const ctx = {
+			...ctxWith({ tokens: 180_000, contextWindow: 200_000, percent: 90 }),
+			compact: () => {
+				compactCalls += 1;
+			},
+		};
+
+		await h.fire("turn_end", {}, ctx);
+
+		expect(compactCalls).toBe(0);
+	});
+});
+
 describe("CONFIG 生效线（自检用真值，防文档漂移）", () => {
 	it("默认自适应：0.25 / 100K 下限 / 无固定覆盖", () => {
 		expect(CONFIG.enterTokens).toBeNull();
 		expect(CONFIG.enterPercent).toBe(0.25);
 		expect(CONFIG.enterFloor).toBe(100_000);
-		expect(CONFIG.foldPercent).toBe(80);
+	});
+
+	it("foldPercent 只有 THRESHOLDS 一个事实源，CONFIG 不再镜像它", () => {
+		// 镜像过一次的那份是死配置：改它对 decideFold 零影响，却会被 /context-archive
+		// 面板当生效值打印，误导排查。折叠门限只认 pipeline.THRESHOLDS.foldPercent。
+		expect(THRESHOLDS.foldPercent).toBe(80);
+		expect("foldPercent" in CONFIG).toBe(false);
+	});
+
+	it("projectionMax 落在宿主内置工具 50KB 截断线之下，投影才会真正触发", () => {
+		// 宿主 core/tools/truncate.ts 的 DEFAULT_MAX_BYTES = 50 * 1024 字节。
+		// 投影线折算成字符若超过它，tool_result 钩子永远拿不到超限内容，投影形同虚设。
+		const HOST_MAX_BYTES = 50 * 1024;
+		expect(estimateTokens("a".repeat(HOST_MAX_BYTES))).toBeGreaterThan(CONFIG.projectionMax);
+		// 中文侧同理：estimateTokens 按 CJK 1 字 1 token 折算，50KB ≈ 17K 汉字
+		expect(estimateTokens("中".repeat(17_000))).toBeGreaterThan(CONFIG.projectionMax);
 	});
 });
