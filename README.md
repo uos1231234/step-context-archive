@@ -11,7 +11,7 @@ step install https://github.com/uos1231234/step-context-archive
 装完即生效：`turn_end` / `session_before_compact` / `tool_result` 三个事件钩子照常工作，
 长会话到 100K 自动介入、压缩前接管归档、10K 工具结果有界投影全部启用。
 装完写进 `~/.stepcode/config.toml` 的 `packages`，**以后每次启动自动校验并更新**。
-（`step list` 查看、`step update --extensions` 更新、`step remove` 卸载。）
+（`step list` 查看、`step remove` 卸载；更新见下方「更新与多副本」。）
 
 > **为什么是 `step install` 而不是 `/plugin marketplace`？**
 > 市场通道**不装载可执行代码**——`packages/coding-agent/src/step/plugins.ts` 原文：
@@ -169,6 +169,38 @@ step install https://github.com/uos1231234/step-context-archive
 - 双 marketplace 声明（`.step-plugin` 与 `.claude-plugin` 同内容）的 `source` 为
   `"."`（仓库根即插件源，**不是**缺省规则 `plugins/<name>`）。
 
+## 更新与多副本
+
+> ⚠️ **`step update --extensions` 不存在，别照着跑。** 实测（Step v0.1.1）：
+> `step update --extensions` 被当成版本号解析，报
+> `Invalid Step release version "…". Expected MAJOR.MINOR.PATCH.`；
+> 裸 `step update` 是 **Step 本体的自更新**（不是刷新扩展），
+> 实测报 `release archive does not contain the Step binary`。
+> 官方 `docs/packages.md` 与 `package-manager-cli.ts` 实现了 `--extensions`，
+> 但 `step/local-update.ts` 的 `STEP_UPDATE_TARGETS` 显示产品层自带同名 `update` 并抢先占用。
+
+**正确更新方式**——三份本地副本各自 fast-forward：
+
+| 副本 | 路径 | 来源 |
+|---|---|---|
+| 扩展通道（`step install` 装的，**生效的就是这份**） | `~/.stepcode/agent/git/github.com/uos1231234/step-context-archive` | `packages` |
+| 插件通道 | `~/.stepcode/plugins/context-archive` | 市场安装 |
+| 市场 checkout | `~/.stepcode/marketplaces/step-context-archive` | 市场安装 |
+
+```bash
+for d in ~/.stepcode/agent/git/github.com/uos1231234/step-context-archive \
+         ~/.stepcode/plugins/context-archive \
+         ~/.stepcode/marketplaces/step-context-archive; do
+  git -C "$d" pull --ff-only
+done
+```
+
+比 `step remove` + `step install` 安全（不用删目录），也不会动 `config.toml` 的 `packages`。
+
+> **诊断陷阱**：**没有 `git fetch` 之前，`git status` 会说谎**——origin 早已领先几十个
+> commit，本地 `status` 仍显示「已是最新」。要判断是否落后，先 `git fetch` 再看
+> `git status -sb`，或直接看 `git log origin/main..HEAD` 是否有输出。
+
 ## 市场副本的用户引导（`step.plugin.json` 的 `description`）
 
 市场安装不装载代码，**没有任何东西会在运行时告诉用户"你装的是壳"**。
@@ -255,6 +287,7 @@ package 通道那份 skill 照常由 `pi.skills` 提供，功能不受影响。
 
 `src/index.ts`（接线）、`src/pipeline.ts`（算法，另建）、`skills/context-archive/`、
 `step.plugin.json`、`.step-plugin/marketplace.json`、`.claude-plugin/marketplace.json`、
+`docs/upstream-findings.md`（对宿主 Step Code 的审计留档：三条 issue 的最终判定与复现证据）、
 `README.md`、`LICENSE`、`.gitignore`。
 
 ## 许可
