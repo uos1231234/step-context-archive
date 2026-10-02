@@ -214,12 +214,22 @@ done
 > 压缩前接管与 recall_by_stamp 工具在此不可用；
 > 启用完整功能请运行 `step install https://github.com/uos1231234/step-context-archive`
 
-**为什么不声明 `skills`（v0.7.0 起）**：`#204` 让市场条目的 `skills` 真的会被装载，
+**为什么显式声明 `"skills": []`（v0.7.0 起）**：`#204` 让市场条目的 `skills` 真的会被装载，
 但**我们的扩展代码只走 package 通道**（`package.json` 的 `pi.extensions`）。市场路径下
 `recall_by_stamp` 工具与 `/recall-stamp` 命令**根本不存在**，装载 `SKILL.md` 等于教模型
 去调不存在的工具；而宿主按 `skill.name` **先到先得**（`core/skills.ts`），
 两份同名 skill 还会撞出 `name "context-archive" collision` 诊断。
 package 通道那份 skill 照常由 `pi.skills` 提供，功能不受影响。
+
+> ⚠️ **必须是空数组，不能只是不写。** 宿主 `step/plugins.ts:748-753` 对每个资源 key 取：
+> ```ts
+> const candidates =
+>   declared !== undefined ? declared : (await pathExists(path.join(pluginDir, key))) ? [key] : [];
+> ```
+> **不写 + `skills/` 目录存在 = 照常装载**——只有显式 `[]` 才算 opt-out
+> （宿主注释原文：*"A declared empty array means this plugin contributes none"*）。
+> `e3d3134` 当初只做了「不声明」，那道防护因此**从未真正生效**；本行由
+> `test/repo-meta.test.ts` 锁定。
 
 **曾尝试过内联 `mcpServers` 提示服务，已移除。** 原因（源码定论，已于 `#204` 由上游修复）：
 `step/mcp.ts` 构造 `DiscoveredServer` 时**不注入插件目录作为 `cwd`**，

@@ -32,14 +32,20 @@ describe("仓库元数据（防回归）", () => {
 		expect(manifest.description).toContain("不含可执行代码");
 	});
 
-	it("插件清单不声明 skills（市场路径不运行扩展，装了只会误导并撞名）", () => {
+	it("插件清单显式声明 skills 为空数组（市场路径不运行扩展，装了只会误导并撞名）", () => {
 		const manifest = JSON.parse(read("../step.plugin.json"));
 		// Step-Code #204（2026-09-30 合并）让市场条目的 skills 经 resources_discover 真的被装载。
 		// 我们的扩展代码只走 package 通道（package.json 的 pi.extensions）；市场条目不装载代码，
 		// 所以市场路径下 recall_by_stamp 工具与 /recall-stamp 命令并不存在——装载 SKILL.md
 		// 等于教模型去调不存在的工具；而且宿主按 skill.name 先到先得（core/skills.ts），
 		// 与 package 通道那份同名 skill 撞出 `name "context-archive" collision` 诊断。
-		expect(manifest.skills).toBeUndefined();
+		//
+		// 必须是**空数组**而不是不写：宿主 `step/plugins.ts:748-753` 对每个 key 取
+		//   declared !== undefined ? declared : (目录存在 ? [key] : [])
+		// 也就是说**不写 + skills/ 目录存在 = 照常装载**。只有显式写 [] 才算 opt-out，
+		// 这也是宿主注释 "A declared empty array means this plugin contributes none" 指的路径。
+		// e3d3134 当初只是「不声明」，所以那道防护从来没有真正生效过。
+		expect(manifest.skills).toEqual([]);
 	});
 
 	it("两份 marketplace 条目的 description 同样带引导（列表页渲染的是这一份）", () => {
